@@ -1,0 +1,14 @@
+Section,Row_Label,Target_Concept,Indentation,Format
+SOURCES AND USES (LBO),SOURCES,,,bold_header
+SOURCES AND USES (LBO),  Senior Debt (3.0x Lev),,1,number
+SOURCES AND USES (LBO),  Mezzanine Debt (1.0x Lev),,1,number
+SOURCES AND USES (LBO),  Sponsor Equity (Plug),,1,number_bold
+SOURCES AND USES (LBO),USES,,,bold_header
+SOURCES AND USES (LBO),  Purchase Equity,,1,number
+SOURCES AND USES (LBO),  Refinance Net Debt,,1,number
+SOURCES AND USES (LBO),  Transaction Fees,,1,number
+CREDIT METRICS,LTM EBITDA,us-gaap_EarningsBeforeInterestTaxesAndDepreciation,0,number_bold
+CREDIT METRICS,Total Debt,us-gaap_DebtInstrumentCarryingAmount,0,number
+CREDIT METRICS,Cash,us-gaap_CashAndCashEquivalentsAtCarryingValue,0,number
+CREDIT METRICS,Net Debt,,0,number_bold
+CREDIT METRICS,Leverage Ratio (Net Debt / EBITDA),,0,number_decimal

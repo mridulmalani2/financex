@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.DS_Store
+final_ib_models/
+messy_input.csv
+normalized_financials.csv
+client_upload.xlsx

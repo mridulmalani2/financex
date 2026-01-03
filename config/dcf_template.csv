@@ -1,0 +1,14 @@
+Section,Row_Label,Target_Concept,Indentation,Format
+OPERATING MODEL,Total Revenue,us-gaap_Revenues,0,number_bold
+OPERATING MODEL,  (-) Cost of Goods Sold,us-gaap_CostOfRevenue,1,number
+OPERATING MODEL,  (=) Gross Profit,us-gaap_GrossProfit,1,number_bold
+OPERATING MODEL,  (-) SG&A,us-gaap_SellingGeneralAndAdministrativeExpense,1,number
+OPERATING MODEL,  (-) R&D,us-gaap_ResearchAndDevelopmentExpense,1,number
+OPERATING MODEL,  (-) Restructuring / One-offs,us-gaap_RestructuringCharges,1,number
+OPERATING MODEL,  (=) EBITDA (Normalized),us-gaap_EarningsBeforeInterestTaxesAndDepreciation,1,number_bold
+CASH FLOW BRIDGE,  (-) D&A,us-gaap_DepreciationDepletionAndAmortization,1,number
+CASH FLOW BRIDGE,  (=) EBIT,us-gaap_OperatingIncomeLoss,1,number_bold
+CASH FLOW BRIDGE,  (-) Cash Taxes,us-gaap_IncomeTaxesPaid,1,number
+CASH FLOW BRIDGE,  (-) Change in NWC,us-gaap_IncreaseDecreaseInOperatingCapital,1,number
+CASH FLOW BRIDGE,  (-) Capital Expenditures,us-gaap_PaymentsToAcquirePropertyPlantAndEquipment,1,number
+VALUATION METRICS,  (=) Unlevered Free Cash Flow,,1,number_bold
