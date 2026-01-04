@@ -5,3 +5,16 @@ final_ib_models/
 messy_input.csv
 normalized_financials.csv
 client_upload.xlsx
+
+# Temp Sessions (user uploads and intermediate files)
+temp_sessions/
+!temp_sessions/.gitkeep
+
+# Audit reports
+audit_report.csv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
