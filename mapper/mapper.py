@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """
-Stage 2: Deterministic Financial Mapper
-=======================================
+Stage 2: Enhanced Deterministic Financial Mapper
+================================================
 This script acts as the "Compiler Frontend". It maps messy input strings
 to canonical XBRL concept IDs using a strict, tiered resolution strategy.
 
 Resolution Order:
   1. Alias Lookup (config/aliases.csv) -> High priority overrides
   2. Exact Label Match (DB Reverse Index) -> Official taxonomy labels
-  3. Fallback: Unmapped (Error)
+  3. SAFE MODE: Hierarchy Fallback -> Walk up presentation tree
+  4. Fallback: Unmapped (Error)
 
-It DOES NOT use fuzzy matching, ML, or embeddings. 
+Safe Mode Feature:
+  When a granular concept can't be mapped directly, the mapper walks up
+  the XBRL presentation hierarchy to find a valid parent concept.
+  Example: "Apple iPhone Sales" -> walks up to "us-gaap_Revenues"
+
+It DOES NOT use fuzzy matching, ML, or embeddings.
 It ensures 100% traceability to a specific rule or standard.
 """
 import sqlite3
 import csv
 import os
 import sys
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Set
 
 # -------------------------------------------------
 # CONFIGURATION
@@ -26,25 +32,60 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB_PATH = os.path.join(BASE_DIR, "output", "taxonomy_2025.db")
 ALIAS_PATH = os.path.join(BASE_DIR, "config", "aliases.csv")
 
+# Safe Parent Concepts - these are valid fallback targets
+SAFE_PARENT_CONCEPTS = {
+    # Revenue
+    "us-gaap_Revenues", "us-gaap_SalesRevenueNet", "ifrs-full_Revenue",
+    # COGS
+    "us-gaap_CostOfRevenue", "us-gaap_CostOfGoodsAndServicesSold",
+    # OpEx
+    "us-gaap_OperatingExpenses", "us-gaap_SellingGeneralAndAdministrativeExpense",
+    "us-gaap_ResearchAndDevelopmentExpense",
+    # Assets
+    "us-gaap_Assets", "us-gaap_AssetsCurrent", "us-gaap_AssetsNoncurrent",
+    "us-gaap_CashAndCashEquivalentsAtCarryingValue",
+    "us-gaap_AccountsReceivableNetCurrent", "us-gaap_InventoryNet",
+    "us-gaap_PropertyPlantAndEquipmentNet",
+    # Liabilities
+    "us-gaap_Liabilities", "us-gaap_LiabilitiesCurrent", "us-gaap_LiabilitiesNoncurrent",
+    "us-gaap_AccountsPayableCurrent", "us-gaap_LongTermDebt",
+    # Equity
+    "us-gaap_StockholdersEquity", "us-gaap_RetainedEarningsAccumulatedDeficit",
+    # Cash Flow
+    "us-gaap_NetCashProvidedByUsedInOperatingActivities",
+    "us-gaap_PaymentsToAcquirePropertyPlantAndEquipment",
+    # Net Income
+    "us-gaap_NetIncomeLoss",
+    # D&A
+    "us-gaap_DepreciationDepletionAndAmortization",
+    # Interest/Tax
+    "us-gaap_InterestExpense", "us-gaap_IncomeTaxExpenseBenefit",
+}
+
+
 class FinancialMapper:
     def __init__(self, db_path: str, alias_path: str):
         self.db_path = db_path
         self.alias_path = alias_path
         self.conn = None
-        
+
         # Memory Indexes
-        # { "normalized_string": { "concept_id": "...", "source": "...", "method": "..." } }
-        self.lookup_index: Dict[str, dict] = {} 
-        self.reverse_id_map: Dict[str, str] = {} # element_id -> concept_id
+        self.lookup_index: Dict[str, dict] = {}
+        self.reverse_id_map: Dict[str, str] = {}  # element_id -> concept_id
+        self.presentation_parents: Dict[str, List[str]] = {}  # child -> [parents]
+        self.safe_mode_enabled = True
 
     def connect(self):
         if not os.path.exists(self.db_path):
             raise FileNotFoundError(f"Database not found at {self.db_path}")
         self.conn = sqlite3.connect(self.db_path)
+        self.conn.row_factory = sqlite3.Row
+
         # Load data immediately upon connection
         self._load_reverse_id_map()
         self._load_db_labels()
         self._load_aliases()
+        self._load_presentation_hierarchy()
 
     def _normalize(self, text: str) -> str:
         """Strict normalization: lowercase, stripped."""
@@ -57,8 +98,8 @@ class FinancialMapper:
         cur = self.conn.cursor()
         cur.execute("SELECT element_id, concept_id FROM concepts WHERE element_id IS NOT NULL")
         count = 0
-        for eid, cid in cur.fetchall():
-            self.reverse_id_map[eid] = cid
+        for row in cur.fetchall():
+            self.reverse_id_map[row['element_id']] = row['concept_id']
             count += 1
         print(f"    Loaded {count:,} canonical IDs.")
 
@@ -66,6 +107,7 @@ class FinancialMapper:
         """Tier 2: Load all standard labels from the database."""
         print("  Indexing Taxonomy Labels (Tier 2)...")
         cur = self.conn.cursor()
+
         # Get standard labels joined with source info
         query = """
             SELECT l.label_text, c.concept_id, c.element_id, c.source
@@ -75,16 +117,16 @@ class FinancialMapper:
         """
         cur.execute(query)
         count = 0
-        for label, cid, eid, source in cur.fetchall():
-            norm_label = self._normalize(label)
+        for row in cur.fetchall():
+            norm_label = self._normalize(row['label_text'])
             # Only add if not already present (collisions favor first entry, or explicit alias later)
             if norm_label not in self.lookup_index:
                 self.lookup_index[norm_label] = {
-                    "concept_id": cid,
-                    "element_id": eid,
-                    "source": source,
+                    "concept_id": row['concept_id'],
+                    "element_id": row['element_id'],
+                    "source": row['source'],
                     "method": "Standard Label",
-                    "match_text": label
+                    "match_text": row['label_text']
                 }
                 count += 1
         print(f"    Indexed {count:,} standard labels.")
@@ -114,7 +156,7 @@ class FinancialMapper:
 
                 concept_id = self.reverse_id_map[target_element_id]
                 norm_alias = self._normalize(alias)
-                
+
                 # Overwrite existing entry if any
                 self.lookup_index[norm_alias] = {
                     "concept_id": concept_id,
@@ -126,13 +168,184 @@ class FinancialMapper:
                 count += 1
         print(f"    Indexed {count} aliases.")
 
+    def _load_presentation_hierarchy(self):
+        """Load presentation hierarchy for Safe Mode fallback."""
+        print("  Loading Presentation Hierarchy (Tier 3 - Safe Mode)...")
+        cur = self.conn.cursor()
+
+        # Get parent-child relationships
+        query = """
+            SELECT
+                c_child.element_id as child_id,
+                c_parent.element_id as parent_id
+            FROM presentation_roles pr
+            JOIN concepts c_child ON pr.concept_id = c_child.concept_id
+            JOIN concepts c_parent ON pr.parent_concept_id = c_parent.concept_id
+            WHERE c_child.element_id IS NOT NULL
+              AND c_parent.element_id IS NOT NULL
+        """
+        cur.execute(query)
+        count = 0
+        for row in cur.fetchall():
+            child_id = row['child_id']
+            parent_id = row['parent_id']
+            if child_id not in self.presentation_parents:
+                self.presentation_parents[child_id] = []
+            if parent_id not in self.presentation_parents[child_id]:
+                self.presentation_parents[child_id].append(parent_id)
+                count += 1
+        print(f"    Loaded {count:,} hierarchy relationships.")
+
+    def _find_safe_parent(self, element_id: str, max_depth: int = 5) -> Optional[Tuple[str, int, List[str]]]:
+        """
+        Walk up the presentation hierarchy to find a valid safe parent.
+
+        Args:
+            element_id: Starting concept
+            max_depth: Maximum levels to traverse
+
+        Returns:
+            (safe_parent_id, depth, path) or None
+        """
+        visited = set()
+        queue = [(element_id, 0, [element_id])]
+
+        while queue:
+            current, depth, path = queue.pop(0)
+
+            if depth > max_depth:
+                continue
+
+            if current in visited:
+                continue
+            visited.add(current)
+
+            # Check if current concept is a safe parent
+            if current in SAFE_PARENT_CONCEPTS and current != element_id:
+                return (current, depth, path)
+
+            # Get parents
+            parents = self.presentation_parents.get(current, [])
+            for parent in parents:
+                if parent not in visited:
+                    queue.append((parent, depth + 1, path + [parent]))
+
+        return None
+
+    def _try_partial_match(self, raw_input: str) -> Optional[dict]:
+        """
+        Try to find a partial match for revenue/expense-like labels.
+        This handles cases like "Product Revenue" or "Service Costs".
+        """
+        norm_input = self._normalize(raw_input)
+
+        # Revenue patterns
+        revenue_keywords = ['revenue', 'sales', 'net sales', 'total sales', 'total revenue']
+        for kw in revenue_keywords:
+            if kw in norm_input:
+                element_id = 'us-gaap_Revenues'
+                if element_id in self.reverse_id_map:
+                    return {
+                        "concept_id": self.reverse_id_map[element_id],
+                        "element_id": element_id,
+                        "source": "US_GAAP",
+                        "method": "Keyword Match (Revenue)",
+                        "match_text": raw_input
+                    }
+
+        # Cost patterns
+        cost_keywords = ['cost of', 'cogs', 'cost of sales', 'cost of goods', 'cost of revenue']
+        for kw in cost_keywords:
+            if kw in norm_input:
+                element_id = 'us-gaap_CostOfRevenue'
+                if element_id in self.reverse_id_map:
+                    return {
+                        "concept_id": self.reverse_id_map[element_id],
+                        "element_id": element_id,
+                        "source": "US_GAAP",
+                        "method": "Keyword Match (COGS)",
+                        "match_text": raw_input
+                    }
+
+        # Expense patterns
+        expense_map = {
+            'research': 'us-gaap_ResearchAndDevelopmentExpense',
+            'r&d': 'us-gaap_ResearchAndDevelopmentExpense',
+            'selling': 'us-gaap_SellingGeneralAndAdministrativeExpense',
+            'general': 'us-gaap_SellingGeneralAndAdministrativeExpense',
+            'administrative': 'us-gaap_SellingGeneralAndAdministrativeExpense',
+            'sg&a': 'us-gaap_SellingGeneralAndAdministrativeExpense',
+            'depreciation': 'us-gaap_DepreciationDepletionAndAmortization',
+            'amortization': 'us-gaap_DepreciationDepletionAndAmortization',
+            'd&a': 'us-gaap_DepreciationDepletionAndAmortization',
+            'interest expense': 'us-gaap_InterestExpense',
+            'income tax': 'us-gaap_IncomeTaxExpenseBenefit',
+            'tax expense': 'us-gaap_IncomeTaxExpenseBenefit',
+        }
+
+        for keyword, element_id in expense_map.items():
+            if keyword in norm_input:
+                if element_id in self.reverse_id_map:
+                    return {
+                        "concept_id": self.reverse_id_map[element_id],
+                        "element_id": element_id,
+                        "source": "US_GAAP",
+                        "method": f"Keyword Match ({keyword})",
+                        "match_text": raw_input
+                    }
+
+        # Balance sheet patterns
+        bs_map = {
+            'cash': 'us-gaap_CashAndCashEquivalentsAtCarryingValue',
+            'accounts receivable': 'us-gaap_AccountsReceivableNetCurrent',
+            'receivable': 'us-gaap_AccountsReceivableNetCurrent',
+            'inventory': 'us-gaap_InventoryNet',
+            'inventories': 'us-gaap_InventoryNet',
+            'property': 'us-gaap_PropertyPlantAndEquipmentNet',
+            'ppe': 'us-gaap_PropertyPlantAndEquipmentNet',
+            'accounts payable': 'us-gaap_AccountsPayableCurrent',
+            'payable': 'us-gaap_AccountsPayableCurrent',
+            'long-term debt': 'us-gaap_LongTermDebt',
+            'long term debt': 'us-gaap_LongTermDebt',
+            'total debt': 'us-gaap_LongTermDebt',
+            'stockholders equity': 'us-gaap_StockholdersEquity',
+            'shareholders equity': 'us-gaap_StockholdersEquity',
+            'retained earnings': 'us-gaap_RetainedEarningsAccumulatedDeficit',
+            'total assets': 'us-gaap_Assets',
+            'total liabilities': 'us-gaap_Liabilities',
+            'net income': 'us-gaap_NetIncomeLoss',
+            'net loss': 'us-gaap_NetIncomeLoss',
+        }
+
+        for keyword, element_id in bs_map.items():
+            if keyword in norm_input:
+                if element_id in self.reverse_id_map:
+                    return {
+                        "concept_id": self.reverse_id_map[element_id],
+                        "element_id": element_id,
+                        "source": "US_GAAP",
+                        "method": f"Keyword Match ({keyword})",
+                        "match_text": raw_input
+                    }
+
+        return None
+
     def map_input(self, raw_input: str) -> dict:
         """
-        The Core Function. Maps a string to a concept.
+        The Core Function. Maps a string to a concept using tiered resolution.
+
+        Tiers:
+        1. Explicit Alias (highest priority)
+        2. Exact Label Match
+        3. Keyword/Partial Match
+        4. Safe Mode Hierarchy Fallback
+        5. Unmapped (error)
+
         Returns a dict with result metadata.
         """
         norm_input = self._normalize(raw_input)
-        
+
+        # Tier 1 & 2: Exact Match (alias or standard label)
         if norm_input in self.lookup_index:
             match = self.lookup_index[norm_input]
             return {
@@ -143,7 +356,40 @@ class FinancialMapper:
                 "concept_id": match["concept_id"],
                 "method": match["method"]
             }
-        
+
+        # Tier 3: Keyword/Partial Match
+        partial_match = self._try_partial_match(raw_input)
+        if partial_match:
+            return {
+                "input": raw_input,
+                "found": True,
+                "element_id": partial_match["element_id"],
+                "source": partial_match["source"],
+                "concept_id": partial_match["concept_id"],
+                "method": partial_match["method"]
+            }
+
+        # Tier 4: Safe Mode - Walk up hierarchy
+        if self.safe_mode_enabled:
+            # Try to find if the input contains any known element_id
+            for element_id in self.reverse_id_map.keys():
+                # Check if element_id name (after prefix) matches
+                concept_name = element_id.split('_', 1)[-1] if '_' in element_id else element_id
+                if self._normalize(concept_name) in norm_input or norm_input in self._normalize(concept_name):
+                    safe_parent = self._find_safe_parent(element_id)
+                    if safe_parent:
+                        parent_id, depth, path = safe_parent
+                        return {
+                            "input": raw_input,
+                            "found": True,
+                            "element_id": parent_id,
+                            "source": "US_GAAP",
+                            "concept_id": self.reverse_id_map.get(parent_id),
+                            "method": f"Safe Parent Fallback (depth={depth})",
+                            "fallback_path": " -> ".join(path)
+                        }
+
+        # Tier 5: Unmapped
         return {
             "input": raw_input,
             "found": False,
@@ -153,14 +399,51 @@ class FinancialMapper:
             "method": "Unmapped"
         }
 
+    def get_concept_metadata(self, concept_id: str) -> dict:
+        """Get full metadata for a concept from the database."""
+        if not concept_id or not self.conn:
+            return {"balance": None, "period_type": None, "data_type": None}
+
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT balance, period_type, data_type
+            FROM concepts
+            WHERE concept_id = ?
+        """, (concept_id,))
+        row = cur.fetchone()
+
+        if row:
+            return {
+                "balance": row['balance'],
+                "period_type": row['period_type'],
+                "data_type": row['data_type']
+            }
+        return {"balance": None, "period_type": None, "data_type": None}
+
+    def get_standard_label(self, concept_id: str) -> Optional[str]:
+        """Get the standard label for a concept."""
+        if not concept_id or not self.conn:
+            return None
+
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT label_text
+            FROM labels
+            WHERE concept_id = ? AND label_role = 'standard'
+            LIMIT 1
+        """, (concept_id,))
+        row = cur.fetchone()
+        return row['label_text'] if row else None
+
+
 # -------------------------------------------------
 # RUNNER
 # -------------------------------------------------
 def main():
     print("="*60)
-    print("DETERMINISTIC FINANCIAL MAPPER (STAGE 2)")
+    print("ENHANCED DETERMINISTIC FINANCIAL MAPPER (STAGE 2)")
     print("="*60)
-    
+
     # 1. Initialize
     mapper = FinancialMapper(DB_PATH, ALIAS_PATH)
     try:
@@ -171,28 +454,42 @@ def main():
 
     # 2. Test Inputs (Simulating a messy CSV header)
     test_inputs = [
-        "Assets",                   # Exact match US GAAP
-        "Current Assets",           # Exact match US GAAP
-        "Cash",                     # Alias -> CashAndCashEquivalents
-        "Total Revenue",            # Alias -> Revenues
-        "Sales",                    # Alias -> Revenues
-        "Profit for the year",      # Alias -> IFRS ProfitLoss
-        "Mystery Account 123",      # Should Fail
-        "  liabilities  "           # Case/Whitespace normalization
+        # Exact matches
+        "Assets",
+        "Current Assets",
+        "Revenues",
+        # Alias matches
+        "Total Revenue",
+        "Sales",
+        # Keyword matches
+        "Product Revenue",
+        "Service Costs",
+        "R&D Expense",
+        "SG&A",
+        # Safe mode candidates
+        "iPhone Revenue",
+        "Apple Product Sales",
+        "Cloud Services Revenue",
+        # Should fail
+        "Mystery Account 123",
+        # Normalization test
+        "  liabilities  "
     ]
 
     print("\nMapping Test Batch:")
-    print("-" * 100)
-    print(f"{'INPUT':<25} | {'STATUS':<10} | {'METHOD':<15} | {'MAPPED ID'}")
-    print("-" * 100)
+    print("-" * 120)
+    print(f"{'INPUT':<30} | {'STATUS':<10} | {'METHOD':<30} | {'MAPPED ID'}")
+    print("-" * 120)
 
     for txt in test_inputs:
         res = mapper.map_input(txt)
-        status = "✅ MATCH" if res["found"] else "❌ MISS"
+        status = "MATCH" if res["found"] else "MISS"
         mapped_id = res["element_id"] if res["element_id"] else "---"
-        print(f"{res['input']:<25} | {status:<10} | {res['method']:<15} | {mapped_id}")
+        method = res["method"][:28] if res["method"] else "---"
+        print(f"{res['input']:<30} | {status:<10} | {method:<30} | {mapped_id}")
 
-    print("-" * 100)
+    print("-" * 120)
+    print(f"\nMatched: {sum(1 for t in test_inputs if mapper.map_input(t)['found'])}/{len(test_inputs)}")
 
 if __name__ == "__main__":
     main()
