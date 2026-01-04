@@ -242,6 +242,89 @@ def run_engine(normalized_file: str, output_dir: str) -> dict:
     return outputs
 
 
+def run_pipeline_programmatic(excel_path: str, output_dir: str,
+                              quiet: bool = False) -> dict:
+    """
+    Programmatic interface for the pipeline.
+
+    This is the stateless function: Input Path -> Process -> Output Paths
+
+    Args:
+        excel_path: Path to the input Excel file
+        output_dir: Directory for all output files
+        quiet: If True, suppress console output
+
+    Returns:
+        dict with status and file paths:
+        {
+            "success": bool,
+            "error": str or None,
+            "duration": float (seconds),
+            "files": {
+                "messy_input": str,
+                "normalized": str,
+                "dcf": str,
+                "lbo": str,
+                "comps": str,
+                "validation": str,
+                ...
+            }
+        }
+    """
+    import io
+    import contextlib
+
+    result = {
+        "success": False,
+        "error": None,
+        "duration": 0,
+        "files": {}
+    }
+
+    # Validate input
+    if not os.path.exists(excel_path):
+        result["error"] = f"File not found: {excel_path}"
+        return result
+
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+
+    start_time = datetime.now()
+
+    # Optionally suppress output
+    if quiet:
+        output_capture = io.StringIO()
+        context = contextlib.redirect_stdout(output_capture)
+    else:
+        context = contextlib.nullcontext()
+
+    try:
+        with context:
+            # Stage 1: Extract
+            messy_file = run_extractor(excel_path, output_dir)
+            result["files"]["messy_input"] = messy_file
+
+            # Stage 2: Normalize
+            normalized_file = run_normalizer(messy_file, output_dir)
+            result["files"]["normalized"] = normalized_file
+
+            # Stage 3: Generate Models
+            outputs = run_engine(normalized_file, output_dir)
+            result["files"].update(outputs)
+
+        result["success"] = True
+
+    except Exception as e:
+        result["error"] = str(e)
+        import traceback
+        result["traceback"] = traceback.format_exc()
+
+    end_time = datetime.now()
+    result["duration"] = (end_time - start_time).total_seconds()
+
+    return result
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
