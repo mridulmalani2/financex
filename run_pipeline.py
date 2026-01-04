@@ -221,6 +221,24 @@ def run_engine(normalized_file: str, output_dir: str) -> dict:
         print(f"  -> {val_path}")
         print(f"     Results: {pass_count} PASS, {warn_count} WARN, {fail_count} FAIL")
 
+    # Audit Reports
+    print("\n[5/5] Generating Audit Reports...")
+    unmapped = engine.get_unmapped_report()
+    if len(unmapped) > 0:
+        unmapped_path = os.path.join(models_dir, "Unmapped_Data_Report.csv")
+        unmapped.to_csv(unmapped_path, index=False)
+        outputs['unmapped'] = unmapped_path
+        print(f"  WARNING: {len(unmapped)} unmapped rows - see {unmapped_path}")
+    else:
+        print(f"  All data mapped successfully")
+
+    hierarchy = engine.get_hierarchy_resolution_report()
+    if len(hierarchy) > 0:
+        hierarchy_path = os.path.join(models_dir, "Hierarchy_Resolution_Report.csv")
+        hierarchy.to_csv(hierarchy_path, index=False)
+        outputs['hierarchy'] = hierarchy_path
+        print(f"  Hierarchy conflicts resolved: {len(hierarchy)} - see {hierarchy_path}")
+
     return outputs
 
 

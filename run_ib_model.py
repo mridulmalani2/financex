@@ -115,17 +115,39 @@ def main():
     except Exception as e:
         print(f"  ERROR: {e}")
 
+    # Generate Unmapped Data Report (for audit trail)
+    print("\n[5/5] Generating Audit Reports...")
+    try:
+        unmapped = engine.get_unmapped_report()
+        if len(unmapped) > 0:
+            unmapped_path = os.path.join(OUTPUT_DIR, "Unmapped_Data_Report.csv")
+            unmapped.to_csv(unmapped_path, index=False)
+            print(f"  WARNING: {len(unmapped)} unmapped rows - see {unmapped_path}")
+        else:
+            print(f"  All data mapped successfully (no unmapped rows)")
+
+        hierarchy = engine.get_hierarchy_resolution_report()
+        if len(hierarchy) > 0:
+            hierarchy_path = os.path.join(OUTPUT_DIR, "Hierarchy_Resolution_Report.csv")
+            hierarchy.to_csv(hierarchy_path, index=False)
+            print(f"  Hierarchy conflicts resolved: {len(hierarchy)} - see {hierarchy_path}")
+    except Exception as e:
+        print(f"  ERROR generating audit reports: {e}")
+
     # Summary
     print("\n" + "=" * 70)
     print("GENERATION COMPLETE")
     print("=" * 70)
     print(f"\nOutput files in: {OUTPUT_DIR}/")
-    print("  - DCF_Historical_Setup.csv    (Valuation Model)")
-    print("  - LBO_Credit_Stats.csv        (Leverage Analysis)")
-    print("  - Comps_Trading_Metrics.csv   (Trading Comparables)")
-    print("  - Validation_Report.csv       (Quality Assurance)")
+    print("  - DCF_Historical_Setup.csv        (Valuation Model)")
+    print("  - LBO_Credit_Stats.csv            (Leverage Analysis)")
+    print("  - Comps_Trading_Metrics.csv       (Trading Comparables)")
+    print("  - Validation_Report.csv           (Quality Assurance)")
+    print("  - Unmapped_Data_Report.csv        (Audit: Data not mapped)")
+    print("  - Hierarchy_Resolution_Report.csv (Audit: Double-count prevention)")
     print("\nThese files are ready for direct import into Excel/Google Sheets")
     print("for DCF, LBO, and Comps analysis.")
+    print("\nIMPORTANT: Review audit reports to ensure data integrity!")
     print("=" * 70)
 
     return 0
