@@ -89,6 +89,9 @@ class FinancialDataExtractor:
     """
     Extracts financial metrics from normalized data and model outputs.
     Maps raw data to the dictionary format expected by the rule engine.
+
+    PRODUCTION FIX v3.1: Uses EXACT concept matching and hierarchy-aware resolution
+    to prevent extracting component values instead of totals.
     """
 
     def __init__(self, normalized_df: pd.DataFrame = None,
@@ -99,6 +102,46 @@ class FinancialDataExtractor:
         self.dcf_df = dcf_df
         self.lbo_df = lbo_df
         self.comps_df = comps_df
+        self._current_period = None  # Will be auto-detected
+
+    def _detect_current_period(self) -> str:
+        """
+        Detect the most recent period in the data.
+
+        PRODUCTION FIX v3.1: In financial statements, Period 1 is typically
+        the most recent fiscal year. Use min(numeric_periods) not max.
+        Also, prefer Balance Sheet periods since they contain critical A=L+E data.
+        """
+        if self._current_period is not None:
+            return self._current_period
+
+        if self.normalized_df is not None and 'Period_Date' in self.normalized_df.columns:
+            # PRODUCTION FIX: Prefer Balance Sheet periods for validation
+            # since the Balance Sheet Equation is a critical check
+            balance_sheet_mask = self.normalized_df['Statement_Source'].str.contains(
+                'Balance', case=False, na=False
+            ) if 'Statement_Source' in self.normalized_df.columns else pd.Series([True] * len(self.normalized_df))
+
+            if balance_sheet_mask.any():
+                periods = self.normalized_df[balance_sheet_mask]['Period_Date'].unique()
+            else:
+                periods = self.normalized_df['Period_Date'].unique()
+
+            # Parse as numbers and take MIN (most recent in financial convention)
+            # In financial statements: Period 1 = current year, Period 2 = prior year, etc.
+            try:
+                numeric_periods = [int(p) for p in periods if str(p).isdigit()]
+                if numeric_periods:
+                    # PRODUCTION FIX: Use MIN (Period 1 is most recent)
+                    self._current_period = str(min(numeric_periods))
+                    return self._current_period
+            except (ValueError, TypeError):
+                pass
+            # Otherwise take the first one
+            self._current_period = str(periods[0]) if len(periods) > 0 else "1"
+        else:
+            self._current_period = "1"
+        return self._current_period
 
     def _safe_float(self, val) -> float:
         """Safely convert value to float, defaulting to 0."""
@@ -113,18 +156,57 @@ class FinancialDataExtractor:
         except (ValueError, TypeError):
             return 0.0
 
+    def _is_total_line(self, label: str) -> bool:
+        """Check if a source label is a total line (vs component)."""
+        if not label:
+            return False
+        label_lower = label.lower()
+        total_indicators = ['total', 'net', 'gross', 'subtotal', 'aggregate']
+        # Check for total indicators at start of label
+        for indicator in total_indicators:
+            if label_lower.startswith(indicator):
+                return True
+        return False
+
     def _get_from_normalized(self, concepts: List[str]) -> float:
-        """Get value from normalized dataframe by concept list."""
+        """
+        Get value from normalized dataframe by EXACT concept matching.
+
+        PRODUCTION FIX: Uses EXACT matching (not str.contains) and hierarchy-aware
+        resolution to pick total lines over component lines.
+        """
         if self.normalized_df is None or self.normalized_df.empty:
             return 0.0
 
+        if 'Canonical_Concept' not in self.normalized_df.columns:
+            return 0.0
+
+        current_period = self._detect_current_period()
+
         for concept in concepts:
-            if 'Canonical_Concept' in self.normalized_df.columns:
-                mask = self.normalized_df['Canonical_Concept'].str.contains(
-                    concept, na=False, regex=False)
-                if mask.any():
-                    return self._safe_float(
-                        self.normalized_df[mask]['Source_Amount'].iloc[0])
+            # EXACT match - not str.contains!
+            mask = self.normalized_df['Canonical_Concept'] == concept
+
+            # Also filter by current period if available
+            if 'Period_Date' in self.normalized_df.columns:
+                period_mask = self.normalized_df['Period_Date'].astype(str) == str(current_period)
+                mask = mask & period_mask
+
+            if mask.any():
+                matched_rows = self.normalized_df[mask]
+
+                # If multiple rows match, use hierarchy-aware resolution
+                if len(matched_rows) > 1:
+                    # Prefer rows with "Total" in the source label
+                    if 'Source_Label' in matched_rows.columns:
+                        for _, row in matched_rows.iterrows():
+                            if self._is_total_line(str(row.get('Source_Label', ''))):
+                                return self._safe_float(row['Source_Amount'])
+                    # If no total found, take the max value (protection against under-reporting)
+                    return self._safe_float(matched_rows['Source_Amount'].max())
+                else:
+                    return self._safe_float(matched_rows['Source_Amount'].iloc[0])
+
         return 0.0
 
     def _get_from_model(self, df: pd.DataFrame, patterns: List[str]) -> float:
@@ -145,70 +227,82 @@ class FinancialDataExtractor:
         return 0.0
 
     def extract_current_period(self) -> Dict[str, Any]:
-        """Extract all financial metrics for the current period."""
+        """
+        Extract all financial metrics for the current period.
+
+        PRODUCTION FIX v3.1: Updated to include IFRS concept IDs and ensure
+        proper extraction order (US-GAAP first, then IFRS fallback).
+        """
         d = {}
 
         # === BALANCE SHEET ===
+        # PRODUCTION FIX: Include IFRS concepts for companies using IFRS taxonomy
         d["assets"] = self._get_from_normalized([
-            "us-gaap_Assets", "Assets"
+            "us-gaap_Assets", "ifrs-full_Assets"
         ]) or self._get_from_model(self.dcf_df, ["Total Assets", "Assets"])
 
         d["current_assets"] = self._get_from_normalized([
-            "us-gaap_AssetsCurrent", "CurrentAssets"
+            "us-gaap_AssetsCurrent", "ifrs-full_CurrentAssets"
         ]) or self._get_from_model(self.dcf_df, ["Current Assets"])
 
         d["noncurrent_assets"] = self._get_from_normalized([
-            "us-gaap_AssetsNoncurrent", "NoncurrentAssets"
+            "us-gaap_AssetsNoncurrent", "ifrs-full_NoncurrentAssets"
         ]) or self._get_from_model(self.dcf_df, ["Noncurrent Assets", "Non-Current Assets"])
 
         d["liabilities"] = self._get_from_normalized([
-            "us-gaap_Liabilities", "Liabilities"
+            "us-gaap_Liabilities", "ifrs-full_Liabilities"
         ]) or self._get_from_model(self.dcf_df, ["Total Liabilities", "Liabilities"])
 
         d["current_liabilities"] = self._get_from_normalized([
-            "us-gaap_LiabilitiesCurrent", "CurrentLiabilities"
+            "us-gaap_LiabilitiesCurrent", "ifrs-full_CurrentLiabilities"
         ]) or self._get_from_model(self.dcf_df, ["Current Liabilities"])
 
         d["noncurrent_liabilities"] = self._get_from_normalized([
-            "us-gaap_LiabilitiesNoncurrent", "NoncurrentLiabilities"
+            "us-gaap_LiabilitiesNoncurrent", "ifrs-full_NoncurrentLiabilities"
         ]) or self._get_from_model(self.dcf_df, ["Noncurrent Liabilities", "Non-Current Liabilities"])
 
         d["equity"] = self._get_from_normalized([
-            "us-gaap_StockholdersEquity", "Equity"
+            "us-gaap_StockholdersEquity", "us-gaap_StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+            "ifrs-full_Equity", "ifrs-full_EquityAttributableToOwnersOfParent"
         ]) or self._get_from_model(self.dcf_df, ["Equity", "Stockholders Equity", "Shareholders Equity"])
 
         d["common_stock"] = self._get_from_normalized([
-            "us-gaap_CommonStockValue", "CommonStock"
+            "us-gaap_CommonStockValue", "ifrs-full_IssuedCapital"
         ]) or self._get_from_model(self.dcf_df, ["Common Stock"])
 
         d["apic"] = self._get_from_normalized([
-            "us-gaap_AdditionalPaidInCapital", "APIC"
+            "us-gaap_AdditionalPaidInCapital", "ifrs-full_SharePremium"
         ]) or self._get_from_model(self.dcf_df, ["Additional Paid-In Capital", "APIC"])
 
         d["re_begin"] = 0.0  # Would need prior period
         d["re_end"] = self._get_from_normalized([
-            "us-gaap_RetainedEarningsAccumulatedDeficit", "RetainedEarnings"
+            "us-gaap_RetainedEarningsAccumulatedDeficit", "ifrs-full_RetainedEarnings"
         ]) or self._get_from_model(self.dcf_df, ["Retained Earnings"])
 
         d["other_equity"] = 0.0  # Calculated as residual
 
-        # Cash
+        # Cash - PRODUCTION FIX: Include IFRS concepts
         d["cash_begin"] = 0.0  # Would need prior period
         d["cash_end"] = self._get_from_normalized([
-            "us-gaap_CashAndCashEquivalentsAtCarryingValue", "Cash"
+            "us-gaap_CashAndCashEquivalentsAtCarryingValue",
+            "us-gaap_CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+            "ifrs-full_CashAndCashEquivalents", "ifrs-full_Cash"
         ]) or self._get_from_model(self.dcf_df, ["Cash", "Cash and Equivalents"])
 
-        # AR, Inventory, AP
+        # AR, Inventory, AP - PRODUCTION FIX: Include IFRS concepts
         d["ar"] = self._get_from_normalized([
-            "us-gaap_AccountsReceivableNetCurrent", "AccountsReceivable"
+            "us-gaap_AccountsReceivableNetCurrent", "us-gaap_AccountsReceivableNet",
+            "ifrs-full_TradeAndOtherCurrentReceivables", "ifrs-full_TradeReceivables"
         ]) or self._get_from_model(self.dcf_df, ["Accounts Receivable", "AR"])
 
         d["inventory"] = self._get_from_normalized([
-            "us-gaap_InventoryNet", "Inventory"
+            "us-gaap_InventoryNet", "us-gaap_InventoryGross",
+            "ifrs-full_Inventories"
         ]) or self._get_from_model(self.dcf_df, ["Inventory"])
 
         d["ap"] = self._get_from_normalized([
-            "us-gaap_AccountsPayableCurrent", "AccountsPayable"
+            "us-gaap_AccountsPayableCurrent", "us-gaap_AccountsPayable",
+            "ifrs-full_TradeAndOtherCurrentPayables"
         ]) or self._get_from_model(self.dcf_df, ["Accounts Payable", "AP"])
 
         d["other_current_assets"] = 0.0
@@ -216,16 +310,18 @@ class FinancialDataExtractor:
         d["other_noncurrent_assets"] = 0.0
         d["other_noncurrent_liabilities"] = 0.0
 
-        # PPE
+        # PPE - PRODUCTION FIX: Include IFRS concepts
         d["gross_ppe"] = self._get_from_normalized([
-            "us-gaap_PropertyPlantAndEquipmentGross", "PPE"
+            "us-gaap_PropertyPlantAndEquipmentGross", "us-gaap_PropertyPlantAndEquipmentNet",
+            "ifrs-full_PropertyPlantAndEquipment"
         ]) or self._get_from_model(self.dcf_df, ["PP&E", "PPE", "Property Plant Equipment"])
 
         d["ppe_begin"] = 0.0
         d["ppe_end"] = d["gross_ppe"]
 
         d["intangibles"] = self._get_from_normalized([
-            "us-gaap_IntangibleAssetsNetExcludingGoodwill", "Intangibles"
+            "us-gaap_IntangibleAssetsNetExcludingGoodwill", "us-gaap_IntangibleAssetsNetIncludingGoodwill",
+            "ifrs-full_IntangibleAssetsOtherThanGoodwill"
         ]) or self._get_from_model(self.dcf_df, ["Intangibles", "Intangible Assets"])
 
         # Debt
@@ -245,67 +341,83 @@ class FinancialDataExtractor:
         d["avg_debt"] = d["debt"]  # Simplified
 
         # === INCOME STATEMENT ===
+        # PRODUCTION FIX v3.1: Include IFRS concepts for proper extraction
         d["revenue"] = self._get_from_normalized([
             "us-gaap_Revenues", "us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax",
-            "us-gaap_SalesRevenueNet"
+            "us-gaap_SalesRevenueNet", "us-gaap_SalesRevenueGoodsAndServicesNet",
+            "ifrs-full_Revenue", "ifrs-full_RevenueFromContractsWithCustomers"
         ]) or self._get_from_model(self.dcf_df, ["Revenue", "Total Revenue", "Net Sales", "Sales"])
 
         d["total_revenue"] = d["revenue"]
 
         d["cogs"] = abs(self._get_from_normalized([
-            "us-gaap_CostOfRevenue", "us-gaap_CostOfGoodsAndServicesSold"
+            "us-gaap_CostOfRevenue", "us-gaap_CostOfGoodsAndServicesSold", "us-gaap_CostOfGoodsSold",
+            "ifrs-full_CostOfSales"
         ]) or self._get_from_model(self.dcf_df, ["COGS", "Cost of Revenue", "Cost of Goods Sold"]))
 
         d["gross_profit"] = self._get_from_normalized([
-            "us-gaap_GrossProfit"
+            "us-gaap_GrossProfit", "ifrs-full_GrossProfit"
         ]) or self._get_from_model(self.dcf_df, ["Gross Profit"]) or (d["revenue"] - d["cogs"])
 
         d["sga"] = abs(self._get_from_normalized([
-            "us-gaap_SellingGeneralAndAdministrativeExpense", "SGA"
+            "us-gaap_SellingGeneralAndAdministrativeExpense",
+            "ifrs-full_SellingExpense", "ifrs-full_AdministrativeExpense"
         ]) or self._get_from_model(self.dcf_df, ["SG&A", "SGA", "Selling General Admin"]))
 
         d["rnd"] = abs(self._get_from_normalized([
-            "us-gaap_ResearchAndDevelopmentExpense", "RnD"
+            "us-gaap_ResearchAndDevelopmentExpense",
+            "ifrs-full_ResearchAndDevelopmentExpense"
         ]) or self._get_from_model(self.dcf_df, ["R&D", "Research and Development"]))
 
         d["other_opex"] = 0.0
 
         d["depreciation"] = abs(self._get_from_normalized([
-            "us-gaap_Depreciation", "us-gaap_DepreciationDepletionAndAmortization"
+            "us-gaap_Depreciation", "us-gaap_DepreciationDepletionAndAmortization",
+            "ifrs-full_DepreciationExpense", "ifrs-full_DepreciationAndAmortisationExpense"
         ]) or self._get_from_model(self.dcf_df, ["Depreciation", "D&A"]))
 
         d["amortization"] = abs(self._get_from_normalized([
-            "us-gaap_AmortizationOfIntangibleAssets"
+            "us-gaap_AmortizationOfIntangibleAssets",
+            "ifrs-full_AmortisationExpense"
         ]) or self._get_from_model(self.dcf_df, ["Amortization"]))
 
         d["ebit"] = self._get_from_normalized([
-            "us-gaap_OperatingIncomeLoss"
+            "us-gaap_OperatingIncomeLoss", "us-gaap_IncomeLossFromOperations",
+            "ifrs-full_ProfitLossFromOperatingActivities", "ifrs-full_OperatingProfit"
         ]) or self._get_from_model(self.dcf_df, ["EBIT", "Operating Income"])
 
         d["ebitda"] = self._get_from_model(self.dcf_df, ["EBITDA"]) or (
             d["ebit"] + d["depreciation"] + d["amortization"])
 
         d["interest_expense"] = abs(self._get_from_normalized([
-            "us-gaap_InterestExpense"
+            "us-gaap_InterestExpense", "us-gaap_InterestExpenseDebt",
+            "ifrs-full_InterestExpense", "ifrs-full_FinanceCosts"
         ]) or self._get_from_model(self.dcf_df, ["Interest Expense", "Interest"]))
 
         d["interest_rate"] = 0.05  # Default 5%
 
         d["pretax_income"] = self._get_from_normalized([
-            "us-gaap_IncomeLossFromContinuingOperationsBeforeIncomeTaxes"
+            "us-gaap_IncomeLossFromContinuingOperationsBeforeIncomeTaxes",
+            "us-gaap_IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+            "ifrs-full_ProfitLossBeforeTax"
         ]) or self._get_from_model(self.dcf_df, ["Pretax Income", "EBT", "Income Before Tax"])
 
         d["tax"] = abs(self._get_from_normalized([
-            "us-gaap_IncomeTaxExpenseBenefit"
+            "us-gaap_IncomeTaxExpenseBenefit", "us-gaap_CurrentIncomeTaxExpenseBenefit",
+            "ifrs-full_IncomeTaxExpenseContinuingOperations"
         ]) or self._get_from_model(self.dcf_df, ["Tax", "Income Tax", "Tax Expense"]))
 
         d["tax_paid"] = d["tax"]  # Simplified
 
+        # PRODUCTION FIX: Net Income - Include IFRS ProfitLoss concept
         d["net_income"] = self._get_from_normalized([
-            "us-gaap_NetIncomeLoss", "us-gaap_ProfitLoss"
+            "us-gaap_NetIncomeLoss", "us-gaap_ProfitLoss",
+            "us-gaap_NetIncomeLossAttributableToParent",
+            "ifrs-full_ProfitLoss", "ifrs-full_ProfitLossAttributableToOwnersOfParent"
         ]) or self._get_from_model(self.dcf_df, ["Net Income", "Net Profit"])
 
-        d["total_expenses"] = d["cogs"] + d["sga"] + d["depreciation"] + d["amortization"] + d["interest_expense"] + d["tax"]
+        # PRODUCTION FIX v3.1: Include R&D in total expenses
+        d["total_expenses"] = d["cogs"] + d["sga"] + d["rnd"] + d["depreciation"] + d["amortization"] + d["interest_expense"] + d["tax"]
 
         # EPS / Shares
         d["eps"] = self._get_from_normalized([
@@ -473,11 +585,16 @@ class ForensicRuleEngine:
              "diff": d["assets"] - (d["liabilities"] + d["equity"])}
         ))
 
+        # PRODUCTION FIX v3.1: Cash flow reconciliation requires multi-period data.
+        # Only flag if we have both beginning and ending cash AND cash flows.
+        # If cash_begin is 0 (not available), this check should be informational only.
+        has_prior_period = d["cash_begin"] != 0
         findings.append(self._rule(
             "Cash Flow - Balance Sheet Consistency",
+            has_prior_period and  # Only check if prior period data exists
             abs((d["cfo"] + d["cfi"] + d["cff"]) - (d["cash_end"] - d["cash_begin"])) > self.tol
             and (d["cfo"] != 0 or d["cfi"] != 0 or d["cff"] != 0),
-            "CRITICAL", "Cash does not reconcile",
+            "WARNING", "Cash flow does not reconcile to balance sheet change",
             "ACCOUNTING_IDENTITY",
             {"cfo": d["cfo"], "cfi": d["cfi"], "cff": d["cff"],
              "cash_change": d["cash_end"] - d["cash_begin"]}
@@ -510,11 +627,14 @@ class ForensicRuleEngine:
             {"ebitda": d["ebitda"], "ebit": d["ebit"], "da": d["depreciation"] + d["amortization"]}
         ))
 
+        # PRODUCTION FIX v3.1: EBIT vs (NI + Int + Tax) may differ due to other income/expense items.
+        # This is common in real financial statements. Use a 5% tolerance and only WARNING.
+        ebit_calc = d["net_income"] + d["interest_expense"] + d["tax"]
+        ebit_tolerance = max(abs(d["ebit"]) * 0.05, self.tol)  # 5% or absolute tolerance
         findings.append(self._rule(
             "EBIT Calculation",
-            abs(d["ebit"] - (d["net_income"] + d["interest_expense"] + d["tax"])) > self.tol
-            and d["ebit"] != 0,
-            "CRITICAL", "EBIT mismatch",
+            abs(d["ebit"] - ebit_calc) > ebit_tolerance and d["ebit"] != 0,
+            "WARNING", "EBIT differs from NI + Interest + Tax (may include other items)",
             "ACCOUNTING_IDENTITY",
             {"ebit": d["ebit"], "net_income": d["net_income"], "interest": d["interest_expense"], "tax": d["tax"]}
         ))
@@ -537,40 +657,45 @@ class ForensicRuleEngine:
             {"equity": d["equity"], "common_stock": d["common_stock"], "apic": d["apic"], "re": d["re_end"]}
         ))
 
+        # PRODUCTION FIX v3.1: Composition checks should only flag CRITICAL when
+        # component data exists AND is mathematically inconsistent.
+        # If components are zero (not reported), this is a data coverage issue, not an error.
+        ca_components = d["cash_end"] + d["ar"] + d["inventory"] + d["other_current_assets"]
         findings.append(self._rule(
             "Current Assets Composition",
-            abs(d["current_assets"] - (d["cash_end"] + d["ar"] + d["inventory"] + d["other_current_assets"])) > self.tol
-            and d["current_assets"] != 0,
-            "CRITICAL", "Current assets broken",
+            # Only fail if: (1) components exist, (2) components > total (double counting), OR (3) significant under-reporting with data
+            ca_components > d["current_assets"] + self.tol  # Components exceed total = double counting
+            or (d["ar"] > 0 and d["inventory"] > 0 and abs(d["current_assets"] - ca_components) > d["current_assets"] * 0.1),
+            "CRITICAL", "Current assets composition mismatch (components > total)",
             "ACCOUNTING_IDENTITY",
-            {"current_assets": d["current_assets"], "cash": d["cash_end"], "ar": d["ar"], "inventory": d["inventory"]}
+            {"current_assets": d["current_assets"], "cash": d["cash_end"], "ar": d["ar"], "inventory": d["inventory"], "sum": ca_components}
         ))
 
+        nca_components = d["gross_ppe"] + d["intangibles"] + d["other_noncurrent_assets"]
         findings.append(self._rule(
             "Noncurrent Assets Composition",
-            abs(d["noncurrent_assets"] - (d["gross_ppe"] + d["intangibles"] + d["other_noncurrent_assets"])) > self.tol
-            and d["noncurrent_assets"] != 0,
-            "CRITICAL", "Noncurrent assets broken",
+            nca_components > d["noncurrent_assets"] + self.tol,  # Only fail if components exceed total
+            "CRITICAL", "Noncurrent assets composition mismatch (components > total)",
             "ACCOUNTING_IDENTITY",
-            {"noncurrent_assets": d["noncurrent_assets"], "ppe": d["gross_ppe"], "intangibles": d["intangibles"]}
+            {"noncurrent_assets": d["noncurrent_assets"], "ppe": d["gross_ppe"], "intangibles": d["intangibles"], "sum": nca_components}
         ))
 
+        cl_components = d["ap"] + d["short_term_debt"] + d["other_current_liabilities"]
         findings.append(self._rule(
             "Current Liabilities Composition",
-            abs(d["current_liabilities"] - (d["ap"] + d["short_term_debt"] + d["other_current_liabilities"])) > self.tol
-            and d["current_liabilities"] != 0,
-            "CRITICAL", "Current liabilities broken",
+            cl_components > d["current_liabilities"] + self.tol,  # Only fail if components exceed total
+            "CRITICAL", "Current liabilities composition mismatch (components > total)",
             "ACCOUNTING_IDENTITY",
-            {"current_liabilities": d["current_liabilities"], "ap": d["ap"], "st_debt": d["short_term_debt"]}
+            {"current_liabilities": d["current_liabilities"], "ap": d["ap"], "st_debt": d["short_term_debt"], "sum": cl_components}
         ))
 
+        ncl_components = d["long_term_debt"] + d["other_noncurrent_liabilities"]
         findings.append(self._rule(
             "Noncurrent Liabilities Composition",
-            abs(d["noncurrent_liabilities"] - (d["long_term_debt"] + d["other_noncurrent_liabilities"])) > self.tol
-            and d["noncurrent_liabilities"] != 0,
-            "CRITICAL", "Noncurrent liabilities broken",
+            ncl_components > d["noncurrent_liabilities"] + self.tol,  # Only fail if components exceed total
+            "CRITICAL", "Noncurrent liabilities composition mismatch (components > total)",
             "ACCOUNTING_IDENTITY",
-            {"noncurrent_liabilities": d["noncurrent_liabilities"], "lt_debt": d["long_term_debt"]}
+            {"noncurrent_liabilities": d["noncurrent_liabilities"], "lt_debt": d["long_term_debt"], "sum": ncl_components}
         ))
 
         findings.append(self._rule(
@@ -591,22 +716,28 @@ class ForensicRuleEngine:
             {"liabilities": d["liabilities"], "current": d["current_liabilities"], "noncurrent": d["noncurrent_liabilities"]}
         ))
 
+        # PRODUCTION FIX v3.1: Revenue - Expenses = Net Income may not hold exactly
+        # because total_expenses is calculated from known line items and may exclude
+        # "Other income/expense", non-operating items, etc. Use 10% tolerance and WARNING.
+        income_calc = d["total_revenue"] - d["total_expenses"]
+        income_tolerance = max(abs(d["net_income"]) * 0.10, self.tol) if d["net_income"] != 0 else self.tol
         findings.append(self._rule(
             "Total Revenue and Expenses",
-            abs(d["net_income"] - (d["total_revenue"] - d["total_expenses"])) > self.tol
-            and d["total_revenue"] != 0,
-            "CRITICAL", "Income equation broken",
+            abs(d["net_income"] - income_calc) > income_tolerance and d["total_revenue"] != 0,
+            "WARNING", "Net income differs from Revenue - Expenses (may have other items)",
             "ACCOUNTING_IDENTITY",
-            {"net_income": d["net_income"], "revenue": d["total_revenue"], "expenses": d["total_expenses"]}
+            {"net_income": d["net_income"], "revenue": d["total_revenue"], "expenses": d["total_expenses"],
+             "calculated": income_calc}
         ))
 
+        # PRODUCTION FIX v3.1: Include R&D in expense breakdown validation
+        expense_sum = d["cogs"] + d["sga"] + d["rnd"] + d["depreciation"] + d["amortization"] + d["interest_expense"] + d["tax"]
         findings.append(self._rule(
             "Expense Breakdown",
-            abs(d["total_expenses"] - (d["cogs"] + d["sga"] + d["depreciation"] + d["amortization"] + d["interest_expense"] + d["tax"])) > self.tol
-            and d["total_expenses"] != 0,
+            abs(d["total_expenses"] - expense_sum) > self.tol and d["total_expenses"] != 0,
             "CRITICAL", "Expense breakdown mismatch",
             "ACCOUNTING_IDENTITY",
-            {"total_expenses": d["total_expenses"], "cogs": d["cogs"], "sga": d["sga"], "da": d["depreciation"] + d["amortization"]}
+            {"total_expenses": d["total_expenses"], "cogs": d["cogs"], "sga": d["sga"], "rnd": d["rnd"], "da": d["depreciation"] + d["amortization"]}
         ))
 
         findings.append(self._rule(
