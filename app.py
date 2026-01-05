@@ -266,75 +266,362 @@ def render_upload_tab():
                 st.session_state.current_session = None
                 st.session_state.pipeline_result = None
                 st.session_state.audit_report = None
+                st.session_state.manual_overrides = {}
                 st.rerun()
 
 
 def render_audit_tab():
-    """Render the AI Auditor dashboard."""
-    st.markdown("### AI Auditor - Forensic Accounting Dashboard")
+    """
+    Render the AI Auditor dashboard with Human-in-the-Loop capabilities.
+
+    Features:
+    1. Categorized accordion view (Passed/Critical/Warnings)
+    2. Manual Override mechanism for forcing bucket values
+    3. Brute Force button to generate templates despite errors
+    """
+    st.markdown("### AI Auditor - Human-in-the-Loop Dashboard")
 
     if not st.session_state.audit_report:
         st.info("Run the pipeline first to see audit results.")
         return
 
+    # Initialize manual overrides in session state
+    if 'manual_overrides' not in st.session_state:
+        st.session_state.manual_overrides = {}
+
     report = st.session_state.audit_report
 
-    # Overall Status Banner
-    if report.overall_status == "PASSED":
-        st.success("**AUDIT PASSED** - All forensic checks validated successfully")
-    elif report.overall_status == "REVIEW_NEEDED":
-        st.warning("**REVIEW NEEDED** - Some items require attention")
-    else:
-        st.error("**CRITICAL ISSUES** - Data quality concerns detected")
+    # Overall Status Banner with metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Passed", report.pass_count, delta_color="off")
+    with col2:
+        st.metric("Warnings", report.warning_count,
+                  delta_color="inverse" if report.warning_count > 0 else "off")
+    with col3:
+        st.metric("Critical", report.critical_count,
+                  delta_color="inverse" if report.critical_count > 0 else "off")
+    with col4:
+        if report.overall_status == "PASSED":
+            st.success("PASSED")
+        elif report.overall_status == "REVIEW_NEEDED":
+            st.warning("REVIEW")
+        else:
+            st.error("FAILED")
 
     st.divider()
 
-    # Category-wise findings
-    categories = {}
+    # Categorize findings by severity
+    passed_findings = []
+    warning_findings = []
+    critical_findings = []
+
     for finding in report.findings:
-        cat = finding.category
-        if cat not in categories:
-            categories[cat] = []
-        categories[cat].append(finding)
+        if finding.severity == AuditSeverity.PASS:
+            passed_findings.append(finding)
+        elif finding.severity == AuditSeverity.WARNING:
+            warning_findings.append(finding)
+        elif finding.severity == AuditSeverity.CRITICAL:
+            critical_findings.append(finding)
 
-    for category, findings in categories.items():
-        with st.expander(f"**{category.replace('_', ' ').title()}** ({len(findings)} checks)", expanded=True):
-            for finding in findings:
-                color = get_severity_color(finding.severity)
-                icon = get_severity_icon(finding.severity)
+    # ==========================================================================
+    # Section 2: CRITICAL FAILURES (Expanded, Prominent)
+    # ==========================================================================
+    if critical_findings:
+        with st.expander(f"**CRITICAL FAILURES** ({len(critical_findings)} issues)", expanded=True):
+            st.error("These issues may cause invalid model output. Manual intervention recommended.")
 
-                # Severity badge
-                severity_html = f"""
-                <div style="display: flex; align-items: center; margin-bottom: 0.5rem; padding: 0.5rem;
-                            border-left: 4px solid {color}; background: #f8f9fa;">
-                    <span style="background: {color}; color: white; padding: 2px 8px;
-                                 border-radius: 4px; font-weight: bold; margin-right: 10px;">
-                        [{icon}] {finding.severity.value}
-                    </span>
-                    <span style="font-weight: 500;">{finding.check_name}</span>
-                </div>
-                """
-                st.markdown(severity_html, unsafe_allow_html=True)
+            for i, finding in enumerate(critical_findings):
+                st.markdown("---")
+                st.markdown(f"**{finding.check_name}**")
+                st.markdown(f"> {finding.message}")
+
+                # Show details
+                if finding.details:
+                    with st.popover("View Details"):
+                        st.json(finding.details)
+
+                # Interactive "Fix It" - Manual Override
+                override_key = f"critical_{i}_{finding.check_name}"
+                bucket_name = _extract_bucket_name(finding)
+
+                if bucket_name:
+                    st.markdown(f"**Affected Bucket:** `{bucket_name}`")
+
+                    col_a, col_b = st.columns([3, 1])
+                    with col_a:
+                        override_value = st.number_input(
+                            f"Force value for {bucket_name}",
+                            value=st.session_state.manual_overrides.get(bucket_name, 0.0),
+                            key=f"override_{override_key}",
+                            help="Enter a value to override this bucket in the output"
+                        )
+                    with col_b:
+                        if st.button("Apply Override", key=f"apply_{override_key}"):
+                            st.session_state.manual_overrides[bucket_name] = override_value
+                            st.success(f"Override set: {bucket_name} = {override_value:,.2f}")
+                            st.rerun()
+
+                if finding.recommendation:
+                    st.caption(f"Recommendation: {finding.recommendation}")
+
+    # ==========================================================================
+    # Section 3: WARNINGS (Expanded, Prominent)
+    # ==========================================================================
+    if warning_findings:
+        with st.expander(f"**WARNINGS** ({len(warning_findings)} items)", expanded=True):
+            st.warning("These items should be reviewed but may not block model generation.")
+
+            for i, finding in enumerate(warning_findings):
+                st.markdown("---")
+                st.markdown(f"**{finding.check_name}**")
                 st.markdown(f"> {finding.message}")
 
                 if finding.details:
                     with st.popover("View Details"):
                         st.json(finding.details)
 
+                # Interactive "Fix It" for warnings
+                bucket_name = _extract_bucket_name(finding)
+                if bucket_name:
+                    override_key = f"warning_{i}_{finding.check_name}"
+
+                    col_a, col_b = st.columns([3, 1])
+                    with col_a:
+                        override_value = st.number_input(
+                            f"Override {bucket_name}",
+                            value=st.session_state.manual_overrides.get(bucket_name, 0.0),
+                            key=f"override_{override_key}",
+                            help="Enter a value to override this bucket"
+                        )
+                    with col_b:
+                        if st.button("Apply", key=f"apply_{override_key}"):
+                            st.session_state.manual_overrides[bucket_name] = override_value
+                            st.success(f"Override: {bucket_name} = {override_value:,.2f}")
+                            st.rerun()
+
                 if finding.recommendation:
                     st.caption(f"Recommendation: {finding.recommendation}")
 
-    # Export audit report
-    st.divider()
-    audit_df = report.to_dataframe()
-    csv_data = audit_df.to_csv(index=False).encode('utf-8')
+    # ==========================================================================
+    # Section 1: PASSED CHECKS (Collapsed)
+    # ==========================================================================
+    if passed_findings:
+        with st.expander(f"**PASSED CHECKS** ({len(passed_findings)} validated)", expanded=False):
+            for finding in passed_findings:
+                st.markdown(f"+ **{finding.check_name}**: {finding.message}")
 
-    st.download_button(
-        label="Download Audit Report (CSV)",
-        data=csv_data,
-        file_name="audit_report.csv",
-        mime="text/csv"
-    )
+    st.divider()
+
+    # ==========================================================================
+    # Manual Overrides Summary
+    # ==========================================================================
+    if st.session_state.manual_overrides:
+        st.markdown("### Active Overrides")
+        override_df = pd.DataFrame([
+            {"Bucket": k, "Forced Value": f"{v:,.2f}"}
+            for k, v in st.session_state.manual_overrides.items()
+        ])
+        st.dataframe(override_df, use_container_width=True, hide_index=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Clear All Overrides", type="secondary"):
+                st.session_state.manual_overrides = {}
+                st.rerun()
+        with col2:
+            if st.button("Apply Overrides & Regenerate", type="primary"):
+                _regenerate_with_overrides()
+
+    st.divider()
+
+    # ==========================================================================
+    # BRUTE FORCE BUTTON
+    # ==========================================================================
+    st.markdown("### Emergency Actions")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("""
+        **Force Generate Template**
+
+        Use this if the tool is blocked by critical errors.
+        Missing values will be set to 0.0 and flagged.
+        """)
+
+        if st.button("Force Generate Template (Ignore Warnings)", type="secondary",
+                     help="Generate output files even with critical errors - use with caution"):
+            _force_generate_template()
+
+    with col2:
+        # Export audit report
+        audit_df = report.to_dataframe()
+        csv_data = audit_df.to_csv(index=False).encode('utf-8')
+
+        st.download_button(
+            label="Download Audit Report (CSV)",
+            data=csv_data,
+            file_name="audit_report.csv",
+            mime="text/csv"
+        )
+
+
+def _extract_bucket_name(finding) -> str:
+    """Extract the bucket name from an audit finding for override purposes."""
+    # Check the finding message and details for bucket names
+    message = finding.message.lower() if finding.message else ""
+    check_name = finding.check_name.lower() if finding.check_name else ""
+
+    # Map common patterns to bucket names
+    bucket_patterns = {
+        "revenue": "Total Revenue",
+        "net income": "Net Income",
+        "ebitda": "EBITDA",
+        "cogs": "COGS",
+        "gross profit": "Gross Profit",
+        "operating": "Operating Income",
+        "capex": "CapEx",
+        "cash": "Cash",
+        "debt": "Total Debt",
+        "assets": "Total Assets",
+        "liabilities": "Total Liabilities",
+        "equity": "Equity",
+        "inventory": "Inventory",
+        "receivable": "Accounts Receivable",
+        "d&a": "D&A",
+        "depreciation": "D&A",
+        "amortization": "D&A",
+    }
+
+    for pattern, bucket in bucket_patterns.items():
+        if pattern in message or pattern in check_name:
+            return bucket
+
+    # Try to extract from details
+    if finding.details:
+        details_str = str(finding.details).lower()
+        for pattern, bucket in bucket_patterns.items():
+            if pattern in details_str:
+                return bucket
+
+    return None
+
+
+def _regenerate_with_overrides():
+    """Regenerate the models with manual overrides applied."""
+    if not st.session_state.current_session:
+        st.error("No active session")
+        return
+
+    sm = st.session_state.session_manager
+    session_id = st.session_state.current_session.session_id
+    files = sm.get_session_files(session_id)
+
+    if not files.get("dcf"):
+        st.error("No DCF file to modify")
+        return
+
+    try:
+        # Load existing DCF
+        dcf_df = pd.read_csv(files["dcf"], index_col=0)
+
+        # Apply overrides
+        for bucket_name, value in st.session_state.manual_overrides.items():
+            if bucket_name in dcf_df.index:
+                # Apply override to all columns
+                for col in dcf_df.columns:
+                    dcf_df.loc[bucket_name, col] = value
+                st.info(f"Applied override: {bucket_name} = {value:,.2f}")
+
+        # Save modified DCF
+        dcf_df.to_csv(files["dcf"])
+        st.success("Models regenerated with overrides applied!")
+
+        # Re-run audit
+        auditor = AIAuditor(
+            normalized_df=pd.read_csv(files["normalized"]) if files.get("normalized") else None,
+            dcf_df=dcf_df,
+            lbo_df=pd.read_csv(files["lbo"]) if files.get("lbo") else None,
+            comps_df=pd.read_csv(files["comps"]) if files.get("comps") else None
+        )
+        st.session_state.audit_report = auditor.run_full_audit()
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"Error applying overrides: {str(e)}")
+
+
+def _force_generate_template():
+    """
+    Force generate template files even with critical errors.
+    Sets blocking values to 0.0 and outputs files anyway.
+    """
+    if not st.session_state.current_session:
+        st.error("No active session")
+        return
+
+    sm = st.session_state.session_manager
+    session_id = st.session_state.current_session.session_id
+    files = sm.get_session_files(session_id)
+
+    try:
+        with st.spinner("Force generating templates..."):
+            # Load or create DCF template
+            if files.get("dcf") and os.path.exists(files["dcf"]):
+                dcf_df = pd.read_csv(files["dcf"], index_col=0)
+            else:
+                # Create minimal template structure
+                periods = ["2024", "2023", "2022"]
+                dcf_template = {
+                    "Total Revenue": [0.0, 0.0, 0.0],
+                    "(-) COGS": [0.0, 0.0, 0.0],
+                    "(=) Gross Profit": [0.0, 0.0, 0.0],
+                    "(-) SG&A": [0.0, 0.0, 0.0],
+                    "(-) R&D": [0.0, 0.0, 0.0],
+                    "(=) EBITDA": [0.0, 0.0, 0.0],
+                    "(-) D&A": [0.0, 0.0, 0.0],
+                    "(=) EBIT": [0.0, 0.0, 0.0],
+                    "(-) Cash Taxes": [0.0, 0.0, 0.0],
+                    "(=) NOPAT": [0.0, 0.0, 0.0],
+                    "(-) CapEx": [0.0, 0.0, 0.0],
+                    "(=) Unlevered Free Cash Flow": [0.0, 0.0, 0.0],
+                }
+                dcf_df = pd.DataFrame(dcf_template, index=periods).T
+
+            # Apply any manual overrides
+            for bucket_name, value in st.session_state.manual_overrides.items():
+                if bucket_name in dcf_df.index:
+                    for col in dcf_df.columns:
+                        dcf_df.loc[bucket_name, col] = value
+
+            # Add FORCED_GENERATION flag
+            dcf_df["_FORCED_GENERATION"] = "YES - Review Required"
+
+            # Save the forced template
+            output_dir = sm.get_output_dir(session_id)
+            forced_path = os.path.join(output_dir, "DCF_Historical_Setup_FORCED.csv")
+            dcf_df.to_csv(forced_path)
+
+            # Also update the main DCF file
+            if files.get("dcf"):
+                dcf_df.to_csv(files["dcf"])
+
+            st.success("Forced template generated successfully!")
+            st.warning("**Note:** This template contains placeholder values. Manual review is required.")
+
+            # Provide download
+            csv_data = dcf_df.to_csv().encode('utf-8')
+            st.download_button(
+                label="Download Forced DCF Template",
+                data=csv_data,
+                file_name="DCF_Historical_Setup_FORCED.csv",
+                mime="text/csv",
+                type="primary"
+            )
+
+    except Exception as e:
+        st.error(f"Force generation failed: {str(e)}")
 
 
 def render_data_tab():
