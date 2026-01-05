@@ -32,10 +32,11 @@ import os
 import sys
 import logging
 import time
-from typing import Dict, Set, List, Tuple, Optional
+import json
+from datetime import datetime
+from typing import Dict, Set, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
 from collections import defaultdict
-from datetime import datetime
 
 # Configure logging for engine
 logging.basicConfig(level=logging.INFO)
@@ -209,6 +210,39 @@ class HierarchyGroup:
     is_total_line: bool = False
 
 
+@dataclass
+class SourceDetail:
+    """Detailed source information for lineage tracking."""
+    row_index: int                    # Row number in normalized_financials.csv
+    source_label: str                 # Original line item text
+    amount: float                     # Value from this source
+    canonical_concept: str            # XBRL concept ID
+    map_method: str                   # How it was mapped
+    statement_source: str             # Income Statement / Balance Sheet / Cash Flow
+    role: str                         # TOTAL_LINE / COMPONENT / AMBIGUOUS
+
+
+@dataclass
+class LineageEntry:
+    """
+    Complete lineage for a DCF metric cell.
+
+    This enables "Click-to-Audit" by storing EXACTLY what contributed
+    to each calculated value, enabling drill-down and in-place remediation.
+    """
+    metric_name: str                   # e.g., "Total Revenue"
+    period: str                        # e.g., "2023-12-31"
+    value: float                       # Calculated value
+    source_count: int                  # Number of source rows
+    source_details: List[SourceDetail] # Detailed breakdown
+    resolution_method: str             # How sources were combined
+    explanation: str                   # Human-readable explanation
+    formula: Optional[str] = None      # For derived metrics (e.g., "Revenue - COGS")
+    parent_metrics: List[str] = field(default_factory=list)  # For derived metrics
+    is_derived: bool = False           # True if calculated from other DCF rows
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
 class FinancialEngine:
     """
     JPMC/Citadel-grade Financial Engine with Hierarchy-Aware Aggregation.
@@ -246,6 +280,15 @@ class FinancialEngine:
         # Audit trail
         self.audit_log: List[AuditEntry] = []
 
+        # ===================================================================
+        # LINEAGE TRACKING - Click-to-Audit Support
+        # ===================================================================
+        # Maps (metric_name, period) -> LineageEntry with full source details
+        self.lineage_map: Dict[Tuple[str, str], LineageEntry] = {}
+
+        # Build row index for quick source lookup
+        self._build_row_index()
+
         # Report unmapped data
         if self.unmapped_count > 0:
             print(f"  WARNING: {self.unmapped_count} rows unmapped and excluded from analysis")
@@ -280,6 +323,103 @@ class FinancialEngine:
             if indicator in label_lower:
                 return True
         return False
+
+    def _build_row_index(self):
+        """
+        Build an index mapping (source_label, period, concept) -> row_index.
+        This enables Click-to-Audit by tracking exactly which rows contributed.
+        """
+        self.row_index: Dict[str, int] = {}
+        self.row_details: Dict[int, dict] = {}
+
+        for idx, row in self.raw_df.iterrows():
+            row_key = f"{row.get('Source_Label', '')}|{row.get('Period_Date', '')}|{row.get('Canonical_Concept', '')}"
+            self.row_index[row_key] = idx
+            self.row_details[idx] = {
+                'source_label': row.get('Source_Label', ''),
+                'amount': float(row.get('Source_Amount', 0)),
+                'canonical_concept': row.get('Canonical_Concept', '---'),
+                'map_method': row.get('Map_Method', 'Unknown'),
+                'statement_source': row.get('Statement_Source', 'Unknown'),
+                'period': row.get('Period_Date', 'Unknown'),
+                'status': row.get('Status', 'UNKNOWN')
+            }
+
+    def _get_source_details_for_concept(self, concept: str, period: str) -> List[SourceDetail]:
+        """
+        Get all source details that contributed to a specific concept+period.
+        Returns SourceDetail objects for lineage tracking.
+        """
+        details = []
+
+        for idx, row_info in self.row_details.items():
+            if (row_info['canonical_concept'] == concept and
+                row_info['period'] == period and
+                row_info['status'] == 'VALID'):
+
+                # Determine role
+                if self._detect_total_line(row_info['source_label']):
+                    role = 'TOTAL_LINE'
+                elif self._detect_component_line(row_info['source_label']):
+                    role = 'COMPONENT'
+                else:
+                    role = 'AMBIGUOUS'
+
+                details.append(SourceDetail(
+                    row_index=idx,
+                    source_label=row_info['source_label'],
+                    amount=row_info['amount'],
+                    canonical_concept=row_info['canonical_concept'],
+                    map_method=row_info['map_method'],
+                    statement_source=row_info['statement_source'],
+                    role=role
+                ))
+
+        return details
+
+    def _record_lineage(self, metric_name: str, period: str, value: float,
+                        concept_set: Set[str], resolution_method: str,
+                        is_derived: bool = False, formula: str = None,
+                        parent_metrics: List[str] = None):
+        """
+        Record lineage for a DCF metric cell.
+        """
+        all_sources = []
+        for concept in concept_set:
+            sources = self._get_source_details_for_concept(concept, period)
+            all_sources.extend(sources)
+
+        # Build explanation
+        if is_derived:
+            explanation = f"Calculated: {formula}"
+        elif len(all_sources) == 0:
+            explanation = "No source data found for this metric"
+        elif len(all_sources) == 1:
+            explanation = f"Single source: {all_sources[0].source_label}"
+        else:
+            source_labels = [s.source_label for s in all_sources]
+            if resolution_method == 'TOTAL_LINE_VERIFIED':
+                total_lines = [s for s in all_sources if s.role == 'TOTAL_LINE']
+                if total_lines:
+                    explanation = f"Used '{total_lines[0].source_label}' as verified total from {len(all_sources)} sources"
+                else:
+                    explanation = f"Aggregated {len(all_sources)} sources using {resolution_method}"
+            else:
+                explanation = f"Aggregated {len(all_sources)} sources: {', '.join(source_labels[:3])}" + \
+                              ("..." if len(source_labels) > 3 else "")
+
+        self.lineage_map[(metric_name, period)] = LineageEntry(
+            metric_name=metric_name,
+            period=period,
+            value=value,
+            source_count=len(all_sources),
+            source_details=all_sources,
+            resolution_method=resolution_method,
+            explanation=explanation,
+            formula=formula,
+            parent_metrics=parent_metrics or [],
+            is_derived=is_derived
+        )
 
     def _build_hierarchy_aware_structures(self):
         """
@@ -1152,6 +1292,57 @@ class FinancialEngine:
 
         result_df = pd.DataFrame(data).T
 
+        # =================================================================
+        # LINEAGE TRACKING - Record sources for each DCF metric
+        # =================================================================
+        for period in self.dates:
+            # Base metrics - from direct source data
+            self._record_lineage("Total Revenue", period, revenue[period],
+                                 REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS, "SMART_SUM")
+            self._record_lineage("(-) COGS", period, cogs[period],
+                                 COGS_TOTAL_IDS | COGS_COMPONENT_IDS, "SMART_SUM")
+            self._record_lineage("(-) SG&A", period, sga[period],
+                                 SG_AND_A_IDS, "SUM_BUCKET")
+            self._record_lineage("(-) R&D", period, rnd[period],
+                                 R_AND_D_IDS, "SUM_BUCKET")
+            self._record_lineage("(-) Other Operating Expenses", period, other_opex[period],
+                                 OPEX_TOTAL_IDS, "DERIVED")
+            self._record_lineage("(-) D&A", period, da[period],
+                                 D_AND_A_IDS, "SUM_BUCKET")
+            self._record_lineage("(-) Cash Taxes", period, taxes[period],
+                                 TAX_EXP_IDS, "SUM_BUCKET")
+            self._record_lineage("(-) CapEx", period, capex[period],
+                                 CAPEX_IDS, "SUM_BUCKET")
+
+            # Derived metrics - calculated from other DCF rows
+            self._record_lineage("(=) Gross Profit", period, gross_profit[period],
+                                 set(), "DERIVED", is_derived=True,
+                                 formula="Total Revenue - COGS",
+                                 parent_metrics=["Total Revenue", "(-) COGS"])
+            self._record_lineage("(=) EBITDA", period, ebitda_reported[period],
+                                 set(), "DERIVED", is_derived=True,
+                                 formula="Gross Profit - SG&A - R&D - Other OpEx",
+                                 parent_metrics=["(=) Gross Profit", "(-) SG&A", "(-) R&D", "(-) Other Operating Expenses"])
+            self._record_lineage("(=) EBIT", period, ebit[period],
+                                 set(), "DERIVED", is_derived=True,
+                                 formula="EBITDA - D&A",
+                                 parent_metrics=["(=) EBITDA", "(-) D&A"])
+            self._record_lineage("(=) NOPAT", period, nopat[period],
+                                 set(), "DERIVED", is_derived=True,
+                                 formula="EBIT - Cash Taxes",
+                                 parent_metrics=["(=) EBIT", "(-) Cash Taxes"])
+            self._record_lineage("(-) Change in NWC", period, delta_nwc[period],
+                                 NWC_CURRENT_ASSETS_TOTAL | NWC_CURRENT_ASSETS_COMPS |
+                                 NWC_CURRENT_LIABS_TOTAL | NWC_CURRENT_LIABS_COMPS,
+                                 "NWC_CALCULATION", is_derived=True,
+                                 formula="Δ(Current Assets - Cash - Current Liabilities + STD)")
+            self._record_lineage("(=) Unlevered Free Cash Flow", period, ufcf[period],
+                                 set(), "DERIVED", is_derived=True,
+                                 formula="NOPAT + D&A - ΔWC - CapEx",
+                                 parent_metrics=["(=) NOPAT", "(+) D&A Addback", "(-) Change in NWC", "(-) CapEx"])
+
+        print(f"  [LINEAGE] Recorded {len(self.lineage_map)} lineage entries")
+
         # Final validation - log summary
         print(f"\n  [DCF COMPLETE] Revenue: {revenue.sum():,.0f}, EBITDA: {ebitda_reported.sum():,.0f}, UFCF: {ufcf.sum():,.0f}")
 
@@ -1373,3 +1564,135 @@ class FinancialEngine:
                 'fallback_used': v.fallback_attempted
             } for k, v in sanity_results.items()}
         }
+
+    # =========================================================================
+    # LINEAGE EXPORT - Click-to-Audit Support
+    # =========================================================================
+
+    def get_lineage_for_metric(self, metric_name: str, period: str = None) -> Optional[LineageEntry]:
+        """
+        Get lineage for a specific metric (and optionally period).
+        If period is None, returns lineage for the first available period.
+        """
+        if period:
+            return self.lineage_map.get((metric_name, period))
+
+        # Return first available period for this metric
+        for (m, p), entry in self.lineage_map.items():
+            if m == metric_name:
+                return entry
+        return None
+
+    def get_all_metrics_with_lineage(self) -> List[str]:
+        """Get list of all metrics that have lineage recorded."""
+        return list(set(m for m, p in self.lineage_map.keys()))
+
+    def get_all_periods_with_lineage(self) -> List[str]:
+        """Get list of all periods that have lineage recorded."""
+        return list(set(p for m, p in self.lineage_map.keys()))
+
+    def export_lineage_json(self, output_path: str = None) -> Dict[str, Any]:
+        """
+        Export full lineage map as JSON for Click-to-Audit UI.
+
+        Returns a structured JSON with:
+        - metadata: generation timestamp, version
+        - metrics: nested dict of metric -> period -> lineage details
+        """
+        lineage_export = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "file_version": "1.0",
+                "total_entries": len(self.lineage_map),
+                "source_file": self.norm_file_path
+            },
+            "metrics": {}
+        }
+
+        # Group by metric
+        for (metric_name, period), entry in self.lineage_map.items():
+            if metric_name not in lineage_export["metrics"]:
+                lineage_export["metrics"][metric_name] = {}
+
+            # Convert source details to dicts
+            source_dicts = []
+            for sd in entry.source_details:
+                source_dicts.append({
+                    "row_index": sd.row_index,
+                    "source_label": sd.source_label,
+                    "amount": sd.amount,
+                    "canonical_concept": sd.canonical_concept,
+                    "map_method": sd.map_method,
+                    "statement_source": sd.statement_source,
+                    "role": sd.role
+                })
+
+            lineage_export["metrics"][metric_name][period] = {
+                "value": entry.value,
+                "source_count": entry.source_count,
+                "resolution_method": entry.resolution_method,
+                "explanation": entry.explanation,
+                "is_derived": entry.is_derived,
+                "formula": entry.formula,
+                "parent_metrics": entry.parent_metrics,
+                "source_details": source_dicts,
+                "created_at": entry.created_at
+            }
+
+        # Write to file if path provided
+        if output_path:
+            with open(output_path, 'w') as f:
+                json.dump(lineage_export, f, indent=2)
+            print(f"  [LINEAGE] Exported to {output_path}")
+
+        return lineage_export
+
+    def export_lineage_csv(self, output_path: str = None) -> pd.DataFrame:
+        """
+        Export lineage as a flat CSV for easy viewing.
+        One row per (metric, period, source_row).
+        """
+        rows = []
+        for (metric_name, period), entry in self.lineage_map.items():
+            if entry.source_details:
+                for sd in entry.source_details:
+                    rows.append({
+                        "DCF_Metric": metric_name,
+                        "Period": period,
+                        "Metric_Value": entry.value,
+                        "Source_Row_Index": sd.row_index,
+                        "Source_Label": sd.source_label,
+                        "Source_Amount": sd.amount,
+                        "Canonical_Concept": sd.canonical_concept,
+                        "Map_Method": sd.map_method,
+                        "Statement_Source": sd.statement_source,
+                        "Role": sd.role,
+                        "Resolution_Method": entry.resolution_method,
+                        "Is_Derived": entry.is_derived,
+                        "Formula": entry.formula or ""
+                    })
+            else:
+                # Derived metric with no direct sources
+                rows.append({
+                    "DCF_Metric": metric_name,
+                    "Period": period,
+                    "Metric_Value": entry.value,
+                    "Source_Row_Index": None,
+                    "Source_Label": f"[Calculated: {entry.formula}]" if entry.formula else "[No sources]",
+                    "Source_Amount": None,
+                    "Canonical_Concept": None,
+                    "Map_Method": None,
+                    "Statement_Source": None,
+                    "Role": "DERIVED",
+                    "Resolution_Method": entry.resolution_method,
+                    "Is_Derived": entry.is_derived,
+                    "Formula": entry.formula or ""
+                })
+
+        df = pd.DataFrame(rows)
+
+        if output_path:
+            df.to_csv(output_path, index=False)
+            print(f"  [LINEAGE] Exported CSV to {output_path}")
+
+        return df

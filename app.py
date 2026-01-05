@@ -1397,6 +1397,333 @@ def render_audit_results():
         )
 
 
+# -------------------------------------------------
+# CLICK-TO-AUDIT LINEAGE VIEW - Interactive Drill-Down
+# -------------------------------------------------
+def render_dcf_lineage_view(files: dict):
+    """
+    Render interactive Click-to-Audit lineage view for DCF metrics.
+
+    Features:
+    1. Visual Traceability: Click metric → see constituent source rows
+    2. Recursive Drill-Down: Navigate from DCF → raw source data
+    3. In-Place Remediation: Re-map items directly from drill-down view
+    """
+    lineage_json_path = files.get("dcf_lineage_json")
+    normalized_path = files.get("normalized")
+
+    if not lineage_json_path or not os.path.exists(lineage_json_path):
+        st.warning("Lineage data not available. Re-process your data to generate lineage.")
+        return
+
+    # Load lineage data
+    with open(lineage_json_path, 'r') as f:
+        lineage_data = json.load(f)
+
+    # Load normalized data for remediation
+    normalized_df = None
+    if normalized_path and os.path.exists(normalized_path):
+        normalized_df = pd.read_csv(normalized_path)
+
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                padding: 1rem; border-radius: 8px; margin-bottom: 1rem;">
+        <h4 style="color: #00d4ff; margin: 0;">Click-to-Audit Lineage</h4>
+        <p style="color: #a1a1aa; margin: 0.5rem 0 0 0; font-size: 0.9rem;">
+            Click any metric to drill down into source data. Fix mapping errors in-place.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Initialize session state for lineage view
+    if 'lineage_selected_metric' not in st.session_state:
+        st.session_state.lineage_selected_metric = None
+    if 'lineage_selected_period' not in st.session_state:
+        st.session_state.lineage_selected_period = None
+    if 'lineage_drill_level' not in st.session_state:
+        st.session_state.lineage_drill_level = 0
+
+    metrics = lineage_data.get("metrics", {})
+    if not metrics:
+        st.info("No lineage data found.")
+        return
+
+    # Get available periods from first metric
+    first_metric = list(metrics.keys())[0]
+    periods = list(metrics[first_metric].keys())
+
+    # Period selector
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        selected_period = st.selectbox(
+            "Select Period",
+            periods,
+            index=0,
+            key="lineage_period_select"
+        )
+    with col2:
+        st.metric("Total Metrics", len(metrics))
+
+    st.divider()
+
+    # Create two columns: metrics list and detail view
+    left_col, right_col = st.columns([1, 2])
+
+    with left_col:
+        st.markdown("**DCF Metrics** (click to drill down)")
+
+        # Group metrics by type
+        base_metrics = []
+        derived_metrics = []
+
+        for metric_name, periods_data in metrics.items():
+            if selected_period in periods_data:
+                entry = periods_data[selected_period]
+                if entry.get("is_derived"):
+                    derived_metrics.append((metric_name, entry))
+                else:
+                    base_metrics.append((metric_name, entry))
+
+        # Base metrics (from source data)
+        st.markdown("*Source-based:*")
+        for metric_name, entry in base_metrics:
+            value = entry.get("value", 0)
+            source_count = entry.get("source_count", 0)
+
+            # Create clickable metric card
+            if st.button(
+                f"📊 {metric_name}\n${value:,.0f} ({source_count} sources)",
+                key=f"metric_{metric_name}_{selected_period}",
+                use_container_width=True
+            ):
+                st.session_state.lineage_selected_metric = metric_name
+                st.session_state.lineage_selected_period = selected_period
+                st.rerun()
+
+        # Derived metrics (calculated)
+        st.markdown("*Calculated:*")
+        for metric_name, entry in derived_metrics:
+            value = entry.get("value", 0)
+            formula = entry.get("formula", "")
+
+            if st.button(
+                f"🔢 {metric_name}\n${value:,.0f}",
+                key=f"metric_{metric_name}_{selected_period}",
+                use_container_width=True
+            ):
+                st.session_state.lineage_selected_metric = metric_name
+                st.session_state.lineage_selected_period = selected_period
+                st.rerun()
+
+    with right_col:
+        selected_metric = st.session_state.lineage_selected_metric
+        selected_period_state = st.session_state.lineage_selected_period or selected_period
+
+        if selected_metric and selected_metric in metrics:
+            entry = metrics[selected_metric].get(selected_period_state, {})
+
+            # Header card
+            st.markdown(f"""
+            <div style="background: #1a1a2e; padding: 1rem; border-radius: 8px;
+                        border-left: 4px solid #00d4ff;">
+                <h3 style="color: #fff; margin: 0;">{selected_metric}</h3>
+                <p style="color: #00d4ff; font-size: 1.5rem; margin: 0.5rem 0;">
+                    ${entry.get('value', 0):,.0f}
+                </p>
+                <p style="color: #a1a1aa; margin: 0; font-size: 0.9rem;">
+                    Period: {selected_period_state} | Method: {entry.get('resolution_method', 'N/A')}
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown(f"**Explanation:** {entry.get('explanation', 'N/A')}")
+
+            if entry.get("is_derived"):
+                # Derived metric - show formula and parent metrics
+                st.markdown("---")
+                st.markdown(f"**Formula:** `{entry.get('formula', 'N/A')}`")
+
+                parent_metrics = entry.get("parent_metrics", [])
+                if parent_metrics:
+                    st.markdown("**Drill into parent metrics:**")
+                    for parent in parent_metrics:
+                        if st.button(f"↗️ {parent}", key=f"parent_{parent}"):
+                            st.session_state.lineage_selected_metric = parent
+                            st.rerun()
+            else:
+                # Base metric - show source details
+                source_details = entry.get("source_details", [])
+
+                if source_details:
+                    st.markdown("---")
+                    st.markdown(f"**Source Data ({len(source_details)} rows):**")
+
+                    # Create a dataframe for display
+                    source_df = pd.DataFrame(source_details)
+
+                    # Style based on role
+                    def role_color(role):
+                        if role == "TOTAL_LINE":
+                            return "🟢"
+                        elif role == "COMPONENT":
+                            return "🔵"
+                        return "⚪"
+
+                    if not source_df.empty:
+                        source_df['Role_Icon'] = source_df['role'].apply(role_color)
+                        display_cols = ['Role_Icon', 'source_label', 'amount', 'map_method', 'statement_source']
+                        display_df = source_df[[c for c in display_cols if c in source_df.columns]]
+                        display_df.columns = ['', 'Source Label', 'Amount', 'Map Method', 'Statement']
+
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+                        st.markdown("Legend: 🟢 Total Line | 🔵 Component | ⚪ Ambiguous")
+
+                        # In-place remediation section
+                        st.markdown("---")
+                        st.markdown("**In-Place Remediation**")
+
+                        with st.expander("🔧 Fix a mapping error", expanded=False):
+                            render_inline_remediation(source_df, normalized_df, files)
+                else:
+                    st.info("No source details available for this metric.")
+
+            # Clear selection button
+            if st.button("← Back to All Metrics"):
+                st.session_state.lineage_selected_metric = None
+                st.rerun()
+        else:
+            # No metric selected - show summary
+            st.markdown("""
+            <div style="background: #16213e; padding: 2rem; border-radius: 8px;
+                        text-align: center; border: 2px dashed #3a3a5c;">
+                <h4 style="color: #a1a1aa;">Select a Metric</h4>
+                <p style="color: #6b7280;">Click any metric on the left to see its lineage</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Summary stats
+            st.markdown("---")
+            st.markdown("**Lineage Summary**")
+
+            total_sources = 0
+            metrics_with_sources = 0
+            for m, periods_data in metrics.items():
+                if selected_period in periods_data:
+                    count = periods_data[selected_period].get("source_count", 0)
+                    total_sources += count
+                    if count > 0:
+                        metrics_with_sources += 1
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Metrics with Sources", metrics_with_sources)
+            with col2:
+                st.metric("Total Source Rows", total_sources)
+
+    # Download lineage data
+    st.divider()
+    col1, col2 = st.columns(2)
+    with col1:
+        lineage_csv_path = files.get("dcf_lineage_csv")
+        if lineage_csv_path and os.path.exists(lineage_csv_path):
+            lineage_csv_df = pd.read_csv(lineage_csv_path)
+            st.download_button(
+                "📥 Download Lineage CSV",
+                lineage_csv_df.to_csv(index=False).encode('utf-8'),
+                "DCF_Lineage_Detail.csv",
+                "text/csv"
+            )
+    with col2:
+        st.download_button(
+            "📥 Download Lineage JSON",
+            json.dumps(lineage_data, indent=2).encode('utf-8'),
+            "DCF_Lineage_Map.json",
+            "application/json"
+        )
+
+
+def render_inline_remediation(source_df: pd.DataFrame, normalized_df: pd.DataFrame, files: dict):
+    """
+    Render in-place remediation UI for fixing mapping errors.
+
+    Allows users to:
+    1. Select a source row that was incorrectly mapped
+    2. Choose the correct mapping
+    3. Trigger re-calculation of the model
+    """
+    if source_df.empty:
+        st.info("No sources to remediate.")
+        return
+
+    # Select row to fix
+    source_labels = source_df['source_label'].tolist()
+    selected_label = st.selectbox(
+        "Select source item to re-map:",
+        source_labels,
+        key="remediation_source_select"
+    )
+
+    if selected_label:
+        # Show current mapping
+        row = source_df[source_df['source_label'] == selected_label].iloc[0]
+        st.markdown(f"""
+        **Current Mapping:**
+        - Label: `{row['source_label']}`
+        - Concept: `{row.get('canonical_concept', 'N/A')}`
+        - Method: `{row.get('map_method', 'N/A')}`
+        - Amount: ${row.get('amount', 0):,.0f}
+        """)
+
+        # Load taxonomy concepts for re-mapping
+        concepts_df = load_taxonomy_concepts()
+
+        if not concepts_df.empty:
+            new_concept = st.selectbox(
+                "Re-map to concept:",
+                concepts_df['display'].tolist(),
+                key="remediation_new_concept"
+            )
+
+            if st.button("🔄 Apply Fix & Re-calculate", type="primary"):
+                # Extract element_id from display
+                element_id = new_concept.split(" (")[0] if " (" in new_concept else new_concept
+
+                # Save to aliases and brain
+                try:
+                    from mapper.mapper import save_new_alias
+
+                    # Determine source taxonomy
+                    source_taxonomy = "US_GAAP"
+                    if "ifrs" in element_id.lower():
+                        source_taxonomy = "IFRS"
+
+                    # Save alias
+                    success, msg = save_new_alias(selected_label, element_id, source_taxonomy)
+
+                    if success:
+                        # Learn in brain
+                        st.session_state.brain_manager.add_mapping(
+                            source_label=selected_label,
+                            target_element_id=element_id,
+                            source_taxonomy=source_taxonomy,
+                            notes="Fixed via Click-to-Audit remediation"
+                        )
+
+                        st.success(f"Mapping updated! {selected_label} → {element_id}")
+                        st.info("To apply changes, re-process your data using the Upload tab.")
+
+                        # Set flag for re-processing
+                        st.session_state.pending_rerun = True
+                    else:
+                        st.error(f"Failed to save mapping: {msg}")
+
+                except Exception as e:
+                    st.error(f"Error applying fix: {str(e)}")
+        else:
+            st.warning("Taxonomy concepts not loaded. Cannot re-map.")
+
+
 def render_financial_models():
     """Render financial model outputs."""
     if not st.session_state.current_session:
@@ -1406,7 +1733,7 @@ def render_financial_models():
     sm = st.session_state.session_manager
     files = sm.get_session_files(st.session_state.current_session.session_id)
 
-    model_tabs = st.tabs(["DCF Setup", "LBO Stats", "Comps Metrics", "Validation"])
+    model_tabs = st.tabs(["DCF Setup", "DCF Lineage", "LBO Stats", "Comps Metrics", "Validation"])
 
     with model_tabs[0]:
         dcf_path = files.get("dcf")
@@ -1423,6 +1750,9 @@ def render_financial_models():
             st.warning("DCF model not available")
 
     with model_tabs[1]:
+        render_dcf_lineage_view(files)
+
+    with model_tabs[2]:
         lbo_path = files.get("lbo")
         if lbo_path and os.path.exists(lbo_path):
             df = pd.read_csv(lbo_path, index_col=0)
@@ -1436,7 +1766,7 @@ def render_financial_models():
         else:
             st.warning("LBO model not available")
 
-    with model_tabs[2]:
+    with model_tabs[3]:
         comps_path = files.get("comps")
         if comps_path and os.path.exists(comps_path):
             df = pd.read_csv(comps_path, index_col=0)
@@ -1450,7 +1780,7 @@ def render_financial_models():
         else:
             st.warning("Comps model not available")
 
-    with model_tabs[3]:
+    with model_tabs[4]:
         validation_path = files.get("validation")
         if validation_path and os.path.exists(validation_path):
             df = pd.read_csv(validation_path)

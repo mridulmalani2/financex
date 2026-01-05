@@ -534,6 +534,9 @@ class SessionManager:
             "validation": check_path(os.path.join(models_dir, "Validation_Report.csv")),
             "unmapped": check_path(os.path.join(models_dir, "Unmapped_Data_Report.csv")),
             "hierarchy": check_path(os.path.join(models_dir, "Hierarchy_Resolution_Report.csv")),
+            # Click-to-Audit Lineage files
+            "dcf_lineage_json": check_path(os.path.join(models_dir, "DCF_Lineage_Map.json")),
+            "dcf_lineage_csv": check_path(os.path.join(models_dir, "DCF_Lineage_Detail.csv")),
         }
 
 

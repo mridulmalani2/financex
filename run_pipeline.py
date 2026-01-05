@@ -206,6 +206,15 @@ def run_engine(normalized_file: str, output_dir: str) -> dict:
     outputs['dcf'] = dcf_path
     print(f"  -> {dcf_path} ({len(dcf)} metrics)")
 
+    # Export DCF Lineage for Click-to-Audit
+    lineage_json_path = os.path.join(models_dir, "DCF_Lineage_Map.json")
+    engine.export_lineage_json(lineage_json_path)
+    outputs['dcf_lineage'] = lineage_json_path
+
+    lineage_csv_path = os.path.join(models_dir, "DCF_Lineage_Detail.csv")
+    engine.export_lineage_csv(lineage_csv_path)
+    outputs['dcf_lineage_csv'] = lineage_csv_path
+
     # LBO
     print("\n[2/4] Building LBO Credit Statistics...")
     lbo = engine.build_lbo_ready_view()
