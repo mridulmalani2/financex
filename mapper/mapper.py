@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Stage 2: Enhanced Deterministic Financial Mapper
-================================================
+Stage 2: Enhanced Deterministic Financial Mapper - PRODUCTION v3.0
+===================================================================
 This script acts as the "Compiler Frontend". It maps messy input strings
 to canonical XBRL concept IDs using a strict, tiered resolution strategy.
 
+PRODUCTION v3.0 - BYOB Architecture Integration:
+  - Integrates with Analyst Brain (portable JSON memory)
+  - Brain mappings have HIGHEST priority (user memory wins)
+
 Resolution Order:
+  0. Analyst Brain (user's JSON memory) -> HIGHEST priority
   1. Alias Lookup (config/aliases.csv) -> High priority overrides
   2. Exact Label Match (DB Reverse Index) -> Official taxonomy labels
   3. SAFE MODE: Hierarchy Fallback -> Walk up presentation tree
@@ -24,6 +29,17 @@ import csv
 import os
 import sys
 from typing import Dict, Optional, Tuple, List, Set
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Try to import Brain Manager
+try:
+    from utils.brain_manager import BrainManager, get_brain_manager
+    BRAIN_AVAILABLE = True
+except ImportError:
+    BRAIN_AVAILABLE = False
+    print("  Warning: Brain Manager not available. BYOB features disabled.")
 
 # -------------------------------------------------
 # CONFIGURATION
@@ -64,7 +80,15 @@ SAFE_PARENT_CONCEPTS = {
 
 
 class FinancialMapper:
-    def __init__(self, db_path: str, alias_path: str):
+    def __init__(self, db_path: str, alias_path: str, brain_manager: 'BrainManager' = None):
+        """
+        Initialize the Financial Mapper.
+
+        Args:
+            db_path: Path to the taxonomy database
+            alias_path: Path to the aliases CSV file
+            brain_manager: Optional BrainManager instance for BYOB integration
+        """
         self.db_path = db_path
         self.alias_path = alias_path
         self.conn = None
@@ -74,6 +98,10 @@ class FinancialMapper:
         self.reverse_id_map: Dict[str, str] = {}  # element_id -> concept_id
         self.presentation_parents: Dict[str, List[str]] = {}  # child -> [parents]
         self.safe_mode_enabled = True
+
+        # BYOB Integration
+        self.brain_manager = brain_manager
+        self.brain_enabled = brain_manager is not None and BRAIN_AVAILABLE
 
     def connect(self):
         if not os.path.exists(self.db_path):
@@ -330,12 +358,23 @@ class FinancialMapper:
 
         return None
 
+    def set_brain_manager(self, brain_manager: 'BrainManager'):
+        """
+        Set or update the brain manager for BYOB integration.
+
+        Args:
+            brain_manager: BrainManager instance
+        """
+        self.brain_manager = brain_manager
+        self.brain_enabled = brain_manager is not None and BRAIN_AVAILABLE
+
     def map_input(self, raw_input: str) -> dict:
         """
         The Core Function. Maps a string to a concept using tiered resolution.
 
         Tiers:
-        1. Explicit Alias (highest priority)
+        0. Analyst Brain (HIGHEST priority - user memory wins)
+        1. Explicit Alias (high priority)
         2. Exact Label Match
         3. Keyword/Partial Match
         4. Safe Mode Hierarchy Fallback
@@ -344,6 +383,21 @@ class FinancialMapper:
         Returns a dict with result metadata.
         """
         norm_input = self._normalize(raw_input)
+
+        # Tier 0: Analyst Brain (BYOB) - User memory has HIGHEST priority
+        if self.brain_enabled and self.brain_manager:
+            brain_mapping = self.brain_manager.get_mapping(raw_input)
+            if brain_mapping:
+                # Validate that the target exists in our taxonomy
+                if brain_mapping in self.reverse_id_map:
+                    return {
+                        "input": raw_input,
+                        "found": True,
+                        "element_id": brain_mapping,
+                        "source": "BRAIN",
+                        "concept_id": self.reverse_id_map[brain_mapping],
+                        "method": "Analyst Brain (User Memory)"
+                    }
 
         # Tier 1 & 2: Exact Match (alias or standard label)
         if norm_input in self.lookup_index:

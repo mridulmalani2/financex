@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-Stage 5: Enhanced Financial Engine (JPMC/Citadel Grade) - v2.1
-==============================================================
+Stage 5: Enhanced Financial Engine (JPMC/Citadel Grade) - PRODUCTION v3.0
+=========================================================================
 Investment Banking-grade financial modeling engine that transforms
 normalized financial data into audit-ready DCF, LBO, and Comps datasets.
 
-CRITICAL FIXES in v2.1:
+PRODUCTION v3.0 ENHANCEMENTS:
 1. HIERARCHY-AWARE AGGREGATION - Detects "Total + Components" patterns and
    prevents double counting BEFORE pivot aggregation
 2. Source Label Tracking - Keeps original labels for audit trail
 3. Unmapped Data Reporting - Generates report of dropped data
 4. Cross-Statement Validation - Balance sheet equation checks
-5. SANITY LOOP - Validates critical buckets are non-zero with fallback recovery
+5. ENHANCED SANITY LOOP - Validates critical buckets with FUZZY FALLBACK recovery
 6. DEEP CLEAN - Auto-corrects balance sheet equation before model output
+7. NO SILENT FAILURES - If Revenue/EBITDA is zero, attempt aggressive recovery
+8. RAW DATA SCANNING - Scans unmapped data for potential matches
 
 Output Quality: Suitable for JPMC M&A, Citadel fundamental analysis
 
-Philosophy: "Think, Don't Rush" - Validates before output
+Philosophy: "No Silent Failures" - Attempt recovery before outputting zeros
 """
 import pandas as pd
 import os
@@ -33,6 +35,7 @@ logger = logging.getLogger("FinancialEngine")
 # Import Rules and Taxonomy Engine
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.ib_rules import *
+from config.ib_rules import fuzzy_match_bucket, suggest_mapping, KEYWORD_FALLBACK_MAPPINGS
 from taxonomy_utils import get_taxonomy_engine, TaxonomyEngine
 
 
@@ -383,11 +386,15 @@ class FinancialEngine:
     def _sanity_check_bucket(self, bucket_name: str, value: pd.Series,
                               concept_set: Set[str]) -> SanityCheckResult:
         """
-        Check if a critical bucket is zero and attempt keyword-based fallback.
+        Check if a critical bucket is zero and attempt aggressive fallback recovery.
 
-        Philosophy: "Think, Don't Rush" - If a critical bucket is zero,
-        search for any mapped items containing related keywords and
-        forcefully include them.
+        Philosophy: "No Silent Failures" - If a critical bucket is zero,
+        attempt multiple levels of recovery:
+        1. Keyword matching on mapped data
+        2. Fuzzy matching on all data (including unmapped)
+        3. Raw label scanning for any potential matches
+
+        PRODUCTION v3.0: More aggressive recovery with fuzzy matching
         """
         total_value = value.sum() if hasattr(value, 'sum') else value
 
@@ -398,14 +405,15 @@ class FinancialEngine:
                 is_zero=False
             )
 
-        # Bucket is zero - attempt fallback recovery
-        logger.warning(f"SANITY CHECK: {bucket_name} is ZERO - attempting fallback recovery")
+        # Bucket is zero - attempt multi-level fallback recovery
+        logger.warning(f"SANITY CHECK: {bucket_name} is ZERO - initiating aggressive recovery")
 
         fallback_value = 0.0
         fallback_sources = []
 
-        # Search for items containing keywords related to this bucket
+        # LEVEL 1: Keyword matching on mapped data
         keywords_to_search = self._get_keywords_for_bucket(bucket_name)
+        logger.info(f"  LEVEL 1: Searching mapped data for keywords: {keywords_to_search[:5]}...")
 
         for _, row in self.df.iterrows():
             source_label = str(row.get('Source_Label', '')).lower()
@@ -413,16 +421,85 @@ class FinancialEngine:
 
             for keyword in keywords_to_search:
                 if keyword in source_label and amount != 0:
-                    # Found a potential match - check if it's not already included
                     concept = row.get('Canonical_Concept', '')
                     if concept not in concept_set:
                         fallback_value += amount
                         fallback_sources.append(row.get('Source_Label', ''))
-                        logger.info(f"  FALLBACK: Including '{row.get('Source_Label')}' ({amount:,.0f}) for {bucket_name}")
+                        logger.info(f"  LEVEL 1 MATCH: '{row.get('Source_Label')}' ({amount:,.0f})")
                         break
+
+        # LEVEL 2: Search UNMAPPED data with fuzzy matching
+        if fallback_value == 0 and self.unmapped_count > 0:
+            logger.info(f"  LEVEL 2: Searching {self.unmapped_count} unmapped items with fuzzy matching...")
+
+            for _, row in self.unmapped_df.iterrows():
+                source_label = str(row.get('Source_Label', ''))
+                amount = float(row.get('Source_Amount', 0))
+
+                if amount == 0:
+                    continue
+
+                # Use fuzzy matching
+                matched_bucket, matched_concepts = fuzzy_match_bucket(source_label)
+
+                if matched_bucket and bucket_name.lower() in matched_bucket.lower():
+                    fallback_value += amount
+                    fallback_sources.append(f"[FUZZY] {source_label}")
+                    logger.info(f"  LEVEL 2 FUZZY MATCH: '{source_label}' ({amount:,.0f}) -> {matched_bucket}")
+                    continue
+
+                # Also try direct keyword matching
+                for keyword in keywords_to_search:
+                    if keyword in source_label.lower() and amount != 0:
+                        fallback_value += amount
+                        fallback_sources.append(f"[KEYWORD] {source_label}")
+                        logger.info(f"  LEVEL 2 KEYWORD MATCH: '{source_label}' ({amount:,.0f})")
+                        break
+
+        # LEVEL 3: Raw data scan - most aggressive
+        if fallback_value == 0:
+            logger.info(f"  LEVEL 3: Aggressive raw data scan for {bucket_name}...")
+
+            # Scan the raw dataframe for any potential matches
+            for _, row in self.raw_df.iterrows():
+                source_label = str(row.get('Source_Label', ''))
+                amount = float(row.get('Source_Amount', 0))
+
+                if amount == 0:
+                    continue
+
+                label_lower = source_label.lower()
+
+                # Check for direct bucket name matches
+                bucket_keywords = bucket_name.lower().split()
+                matches_all_keywords = all(kw in label_lower for kw in bucket_keywords)
+
+                # Check for common synonyms
+                synonyms_match = False
+                if bucket_name == "Total Revenue":
+                    synonyms_match = any(syn in label_lower for syn in [
+                        "revenue", "sales", "turnover", "income", "net sales"
+                    ])
+                elif bucket_name == "Net Income":
+                    synonyms_match = any(syn in label_lower for syn in [
+                        "net income", "net profit", "net earnings", "net loss",
+                        "profit after", "earnings after"
+                    ])
+                elif bucket_name == "EBITDA":
+                    synonyms_match = any(syn in label_lower for syn in [
+                        "ebitda", "operating profit", "operating income"
+                    ])
+
+                if matches_all_keywords or synonyms_match:
+                    # Check if we haven't already included this
+                    if source_label not in fallback_sources:
+                        fallback_value += amount
+                        fallback_sources.append(f"[RAW] {source_label}")
+                        logger.info(f"  LEVEL 3 RAW SCAN: '{source_label}' ({amount:,.0f})")
 
         if fallback_value != 0:
             logger.info(f"  RECOVERY SUCCESS: {bucket_name} recovered to {fallback_value:,.0f}")
+            logger.info(f"  Sources used: {len(fallback_sources)} items")
             return SanityCheckResult(
                 bucket_name=bucket_name,
                 value=fallback_value,
@@ -432,8 +509,10 @@ class FinancialEngine:
                 fallback_sources=fallback_sources
             )
         else:
-            error_msg = f"CRITICAL: {bucket_name} is ZERO and no fallback data found"
+            error_msg = f"CRITICAL: {bucket_name} is ZERO after 3-level recovery attempt"
             logger.error(error_msg)
+            logger.error(f"  Searched keywords: {keywords_to_search[:10]}...")
+            logger.error(f"  Total rows scanned: {len(self.raw_df)}")
             return SanityCheckResult(
                 bucket_name=bucket_name,
                 value=0.0,
