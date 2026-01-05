@@ -36,6 +36,8 @@ from utils.command_engine import (
     CommandEngine, CommandExecutor, ParseResult, ExecutionResult,
     get_command_engine, reset_command_engine
 )
+from utils.cli_parser import ChatParser, parse_command as cli_parse, get_help as cli_help
+from utils.exporter import create_download_package, export_brain_only, ExportResult
 from config.base_commands import (
     get_commands_by_category, get_action_names, get_backend_actions
 )
@@ -347,6 +349,15 @@ if 'show_teach_me' not in st.session_state:
 if 'failed_command' not in st.session_state:
     st.session_state.failed_command = ""
 
+if 'chat_parser' not in st.session_state:
+    st.session_state.chat_parser = ChatParser()
+
+if 'chat_messages' not in st.session_state:
+    st.session_state.chat_messages = []
+
+if 'pending_rerun' not in st.session_state:
+    st.session_state.pending_rerun = False
+
 
 # -------------------------------------------------
 # HELPER FUNCTIONS
@@ -587,71 +598,274 @@ def render_sidebar():
 
 
 # -------------------------------------------------
-# COMMAND INTERFACE - Conversational CLI
+# COMMAND INTERFACE - Conversational CLI with Auto-Rerun
 # -------------------------------------------------
+def execute_chat_command(user_input: str) -> dict:
+    """
+    Execute a chat command using both the CLI parser and command engine.
+    Handles mapping commands with brain updates and auto-rerun.
+
+    Returns dict with execution results.
+    """
+    # First try the new CLI parser for quick mapping commands
+    parsed = st.session_state.chat_parser.parse(user_input)
+
+    if parsed.success:
+        # Handle based on intent
+        if parsed.intent == "MAP_LABEL":
+            # Map command: Update brain and trigger rerun
+            source_label = parsed.params.get("source_label", "")
+            target_id = parsed.params.get("target_element_id", "")
+
+            if source_label and target_id:
+                # Update brain manager
+                st.session_state.brain_manager.add_mapping(
+                    source_label=source_label,
+                    target_element_id=target_id,
+                    notes=f"Added via chat: '{user_input}'"
+                )
+
+                # Save to aliases.csv for persistence
+                save_new_alias(source_label, target_id, "US_GAAP")
+
+                # Add to chat history
+                st.session_state.chat_messages.append({
+                    "role": "user",
+                    "content": user_input
+                })
+                st.session_state.chat_messages.append({
+                    "role": "assistant",
+                    "content": f"Mapped '{source_label}' to `{target_id}`. Brain updated. Re-running engine..."
+                })
+
+                return {
+                    "success": True,
+                    "message": f"Mapped '{source_label}' to {target_id}",
+                    "requires_refresh": True,
+                    "trigger_rerun": True
+                }
+
+        elif parsed.intent == "SET_VALUE":
+            # Value override
+            bucket = parsed.params.get("bucket", "")
+            value = parsed.params.get("value", 0)
+
+            if bucket:
+                st.session_state.manual_overrides[bucket] = value
+                st.session_state.chat_messages.append({
+                    "role": "user",
+                    "content": user_input
+                })
+                st.session_state.chat_messages.append({
+                    "role": "assistant",
+                    "content": f"Set {bucket} to ${value:,.0f}. Override applied."
+                })
+
+                return {
+                    "success": True,
+                    "message": f"Override: {bucket} = ${value:,.0f}",
+                    "requires_refresh": True
+                }
+
+        elif parsed.intent == "NAVIGATE":
+            dest = parsed.params.get("destination", "")
+            tab_map = {"dcf": 1, "lbo": 1, "comps": 1, "audit": 0, "data": 2, "unmapped": 3, "downloads": 4}
+            if dest in tab_map:
+                st.session_state.current_tab = tab_map[dest]
+                return {
+                    "success": True,
+                    "message": f"Navigated to {dest}",
+                    "requires_refresh": True
+                }
+
+        elif parsed.intent == "DOWNLOAD_BRAIN":
+            return {
+                "success": True,
+                "message": "Brain download ready",
+                "download_brain": True
+            }
+
+        elif parsed.intent == "DOWNLOAD_PACKAGE":
+            return {
+                "success": True,
+                "message": "Package download ready",
+                "download_package": True
+            }
+
+        elif parsed.intent == "HELP":
+            return {
+                "success": True,
+                "message": cli_help(),
+                "show_help": True
+            }
+
+        elif parsed.intent == "BRAIN_STATS":
+            stats = st.session_state.brain_manager.get_session_stats()
+            return {
+                "success": True,
+                "message": f"Brain: {stats['total_user_mappings']} mappings, {stats['custom_commands']} commands",
+                "data": stats
+            }
+
+        elif parsed.intent == "RERUN":
+            return {
+                "success": True,
+                "message": "Re-running engine...",
+                "trigger_rerun": True,
+                "requires_refresh": True
+            }
+
+    # Fall back to the original command engine
+    result = process_command(user_input)
+    return result
+
+
 def render_command_interface():
-    """Render the command line interface panel."""
+    """Render the enhanced command line interface panel with chat."""
     st.markdown("""
     <div class="glass-card" style="border-left: 3px solid #c9a962;">
-        <h3 style="color: #c9a962; margin: 0 0 16px 0;">Command Terminal</h3>
+        <h3 style="color: #c9a962; margin: 0 0 16px 0;">Analyst Chat</h3>
     </div>
     """, unsafe_allow_html=True)
+
+    # Display chat history
+    chat_container = st.container()
+    with chat_container:
+        if st.session_state.chat_messages:
+            for msg in st.session_state.chat_messages[-10:]:
+                if msg["role"] == "user":
+                    st.markdown(f"**You:** {msg['content']}")
+                else:
+                    st.markdown(f"*System:* {msg['content']}")
+
+    st.divider()
 
     # Command input
     user_input = st.text_input(
         "Enter command",
-        placeholder="e.g., Map Sales to Revenue, Show DCF, Set EBITDA to 500000",
+        placeholder="e.g., Map 'Turnover' to Revenue",
         key="command_input",
         label_visibility="collapsed"
     )
 
     col1, col2 = st.columns([3, 1])
     with col1:
-        execute_btn = st.button("Execute", type="primary", use_container_width=True)
+        execute_btn = st.button("Send", type="primary", use_container_width=True)
     with col2:
         help_btn = st.button("?", help="Show command help")
 
     if help_btn:
         with st.expander("Command Examples", expanded=True):
             st.markdown("""
-            **Mapping:**
-            - `Map [label] to Revenue`
-            - `Set [label] as EBITDA`
-            - `Define [label] is Net Income`
+            **Mapping (Auto-rerun enabled):**
+            - `Map 'Turnover' to Revenue`
+            - `'Operating Income' should be EBIT`
+
+            **Value Override:**
+            - `Set EBITDA to 500000`
+            - `Revenue = 1000000`
 
             **Navigation:**
             - `Show DCF` / `Show LBO` / `Show Comps`
-            - `Show warnings` / `Show data`
+            - `Show Audit` / `Show Data`
 
-            **Overrides:**
-            - `Set EBITDA to 500000`
-            - `Fix revenue to 1000000`
+            **Downloads:**
+            - `Download Brain` - Export your brain
+            - `Download Package` - Get everything
 
-            **Auditing:**
-            - `Ignore warning [name]`
-            - `Why [issue]`
-
-            **Pipeline:**
-            - `Force generate`
-            - `Rerun`
-            - `Export all`
-
-            **Brain:**
-            - `Download brain`
-            - `Show brain stats`
+            **Other:**
+            - `Re-run` - Recalculate models
+            - `Brain stats` - Show brain info
+            - `Help` - Show this help
             """)
 
-    # Process command on button click or enter
+    # Process command on button click
     if execute_btn and user_input.strip():
-        result = process_command(user_input.strip())
+        result = execute_chat_command(user_input.strip())
+
+        # Add to command history
+        st.session_state.command_history.append({
+            "input": user_input,
+            "success": result["success"],
+            "message": result["message"],
+            "timestamp": datetime.now().isoformat()
+        })
 
         if result["success"]:
-            st.success(f"OK: {result['message']}")
-            if result["requires_refresh"]:
+            # Handle special actions
+            if result.get("show_help"):
+                st.markdown(result["message"])
+
+            elif result.get("download_brain"):
+                brain_json = st.session_state.brain_manager.to_json_string()
+                st.download_button(
+                    label="Download Brain JSON",
+                    data=brain_json,
+                    file_name="analyst_brain.json",
+                    mime="application/json",
+                    key="chat_brain_download"
+                )
+
+            elif result.get("download_package"):
+                # Use the new exporter
+                if st.session_state.current_session:
+                    sm = st.session_state.session_manager
+                    files = sm.get_session_files(st.session_state.current_session.session_id)
+                    model_files = {
+                        "DCF": files.get("dcf"),
+                        "LBO": files.get("lbo"),
+                        "Comps": files.get("comps"),
+                        "Validation": files.get("validation")
+                    }
+                    export_result = create_download_package(
+                        st.session_state.brain_manager,
+                        model_files
+                    )
+                    if export_result.success:
+                        st.download_button(
+                            label=f"Download {export_result.filename}",
+                            data=export_result.data,
+                            file_name=export_result.filename,
+                            mime=export_result.mime_type,
+                            key="chat_package_download"
+                        )
+                    else:
+                        st.error(f"Export failed: {export_result.error_message}")
+
+            elif result.get("trigger_rerun"):
+                # Re-run the pipeline with updated mappings
+                if st.session_state.current_session:
+                    with st.spinner("Re-running engine with updated mappings..."):
+                        sm = st.session_state.session_manager
+                        session = st.session_state.current_session
+                        files = sm.get_session_files(session.session_id)
+
+                        if files.get("upload"):
+                            output_dir = sm.get_output_dir(session.session_id)
+                            result = run_pipeline_programmatic(files["upload"], output_dir, quiet=True)
+                            st.session_state.pipeline_result = result
+
+                            if result["success"]:
+                                # Re-run audit
+                                auditor = AIAuditor(
+                                    normalized_df=pd.read_csv(files["normalized"]) if files.get("normalized") else None,
+                                    dcf_df=pd.read_csv(files["dcf"]) if files.get("dcf") else None,
+                                    lbo_df=pd.read_csv(files["lbo"]) if files.get("lbo") else None,
+                                    comps_df=pd.read_csv(files["comps"]) if files.get("comps") else None
+                                )
+                                st.session_state.audit_report = auditor.run_full_audit()
+                                st.success("Engine re-run complete!")
+
+            else:
+                st.success(f"OK: {result['message']}")
+
+            if result.get("requires_refresh"):
                 st.rerun()
         else:
             st.error(result["message"])
-            # Show Teach Me wizard
+            # Show Teach Me wizard for unrecognized commands
+            st.session_state.show_teach_me = True
+            st.session_state.failed_command = user_input
             render_teach_me_wizard()
 
     # Show Teach Me wizard if triggered
@@ -795,14 +1009,37 @@ def render_teach_me_wizard():
 # -------------------------------------------------
 # ONBOARDING JOURNEY - 3-Step Guide
 # -------------------------------------------------
+def render_user_instruction_block():
+    """
+    Render the EXACT user instruction guide as specified.
+    This must be displayed prominently on the landing page.
+    """
+    st.info("""
+**How to Use FinanceX - Your 5-Step Journey:**
+
+1. **Launch:** Run `streamlit run app.py` in your terminal.
+
+2. **Prepare:** Use ChatGPT to OCR your PDF into our 3-tab Excel format.
+
+3. **Upload:** Drag & drop your Excel file + your `Analyst_Brain.json`.
+
+4. **Refine:** Use the Chat to fix warnings (e.g., `"Map X to Y"`).
+
+5. **Evolve:** Download your new Brain file to make the tool smarter for next time.
+    """)
+
+
 def render_onboarding():
     """Render the onboarding journey for new users."""
     st.markdown("""
     <div class="glass-card glass-card-highlight" style="text-align: center; padding: 40px;">
         <h2 style="color: #c9a962; margin-bottom: 8px;">Welcome to FinanceX</h2>
-        <p style="color: #a1a1aa; font-size: 1.1rem;">Follow these 3 steps to analyze your financial statements</p>
+        <p style="color: #a1a1aa; font-size: 1.1rem;">Investment Banking-Grade Financial Analysis</p>
     </div>
     """, unsafe_allow_html=True)
+
+    # USER INSTRUCTION BLOCK - Display prominently
+    render_user_instruction_block()
 
     # Step 1: OCR
     st.markdown("""
