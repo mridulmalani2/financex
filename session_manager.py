@@ -393,7 +393,7 @@ class SessionManager:
 
     def get_models_dir(self, session_id: str) -> str:
         """Get the final_ib_models directory for a session."""
-        return os.path.join(TEMP_SESSIONS_DIR, session_id, "final_ib_models")
+        return os.path.join(TEMP_SESSIONS_DIR, session_id, "output", "final_ib_models")
 
     def cleanup_session(self, session_id: str) -> bool:
         """
@@ -519,7 +519,7 @@ class SessionManager:
             return {}
 
         output_dir = os.path.join(session.session_dir, "output")
-        models_dir = os.path.join(session.session_dir, "final_ib_models")
+        models_dir = os.path.join(output_dir, "final_ib_models")
 
         def check_path(path):
             return path if os.path.exists(path) else None
