@@ -360,6 +360,57 @@ if 'pending_rerun' not in st.session_state:
 
 
 # -------------------------------------------------
+# HARD RESET FOR NEW UPLOADS - Enforce Data Integrity
+# -------------------------------------------------
+def reset_session_state_for_new_upload():
+    """
+    HARD RESET: Wipe all data-related session state before processing a new file.
+
+    This ensures:
+    1. No stale data persists from previous uploads
+    2. No fallback to old data if new processing fails
+    3. Clean slate for each file upload
+
+    Called IMMEDIATELY when a new file is detected, BEFORE any processing.
+    """
+    # Clear all data caches first
+    st.cache_data.clear()
+
+    # Note: We intentionally do NOT clear cache_resource (database connections)
+    # as those are truly static resources, not user data
+
+    # Clear previous session data
+    if st.session_state.current_session:
+        sm = st.session_state.session_manager
+        try:
+            sm.cleanup_session(st.session_state.current_session.session_id)
+        except Exception:
+            pass  # Session may already be cleaned up
+
+    # Reset all data-holding session state variables
+    st.session_state.current_session = None
+    st.session_state.pipeline_result = None
+    st.session_state.audit_report = None
+    st.session_state.manual_overrides = {}
+    st.session_state.onboarding_complete = False
+    st.session_state.current_step = 1
+
+    # Clear command history (may contain references to old data)
+    st.session_state.command_history = []
+    st.session_state.chat_messages = []
+    st.session_state.failed_command = ""
+    st.session_state.show_teach_me = False
+    st.session_state.pending_rerun = False
+
+    # Reset command engine state
+    st.session_state.command_engine = CommandEngine()
+    st.session_state.command_executor = CommandExecutor(st.session_state)
+
+    # Note: We preserve brain_manager as it contains user's learned mappings
+    # which should persist across uploads (user's institutional knowledge)
+
+
+# -------------------------------------------------
 # HELPER FUNCTIONS
 # -------------------------------------------------
 @st.cache_resource
@@ -568,12 +619,8 @@ def render_sidebar():
                     st.error(f"Failed")
 
             if st.button("Clear Session", type="secondary", use_container_width=True):
-                sm = st.session_state.session_manager
-                sm.cleanup_session(session.session_id)
-                st.session_state.current_session = None
-                st.session_state.pipeline_result = None
-                st.session_state.audit_report = None
-                st.session_state.onboarding_complete = False
+                # Use centralized reset function for consistency
+                reset_session_state_for_new_upload()
                 st.rerun()
         else:
             st.info("No active session")
@@ -1134,39 +1181,57 @@ def render_onboarding():
         st.success(f"File ready: {uploaded_file.name} ({uploaded_file.size / 1024:.1f} KB)")
 
         if st.button("Process Financial Statements", type="primary", use_container_width=True):
+            # =============================================================
+            # HARD RESET: Wipe ALL previous data BEFORE processing new file
+            # This ensures no stale data can ever be displayed
+            # =============================================================
+            reset_session_state_for_new_upload()
+
             with st.spinner("Processing your data..."):
-                # Create session
-                sm = st.session_state.session_manager
-                session = sm.create_session()
-                st.session_state.current_session = session
+                try:
+                    # Create fresh session
+                    sm = st.session_state.session_manager
+                    session = sm.create_session()
+                    st.session_state.current_session = session
 
-                # Save upload
-                upload_path = sm.save_upload(
-                    session.session_id,
-                    uploaded_file.getvalue(),
-                    uploaded_file.name
-                )
-
-                # Run pipeline
-                output_dir = sm.get_output_dir(session.session_id)
-                result = run_pipeline_programmatic(upload_path, output_dir, quiet=True)
-                st.session_state.pipeline_result = result
-
-                if result["success"]:
-                    # Run AI Auditor
-                    files = sm.get_session_files(session.session_id)
-                    auditor = AIAuditor(
-                        normalized_df=pd.read_csv(files["normalized"]) if files.get("normalized") else None,
-                        dcf_df=pd.read_csv(files["dcf"]) if files.get("dcf") else None,
-                        lbo_df=pd.read_csv(files["lbo"]) if files.get("lbo") else None,
-                        comps_df=pd.read_csv(files["comps"]) if files.get("comps") else None
+                    # Save upload
+                    upload_path = sm.save_upload(
+                        session.session_id,
+                        uploaded_file.getvalue(),
+                        uploaded_file.name
                     )
-                    st.session_state.audit_report = auditor.run_full_audit()
-                    st.session_state.onboarding_complete = True
-                    st.success("Analysis complete!")
-                    st.rerun()
-                else:
-                    st.error(f"Pipeline failed: {result['error']}")
+
+                    # Run pipeline
+                    output_dir = sm.get_output_dir(session.session_id)
+                    result = run_pipeline_programmatic(upload_path, output_dir, quiet=True)
+                    st.session_state.pipeline_result = result
+
+                    if result["success"]:
+                        # Run AI Auditor
+                        files = sm.get_session_files(session.session_id)
+                        auditor = AIAuditor(
+                            normalized_df=pd.read_csv(files["normalized"]) if files.get("normalized") else None,
+                            dcf_df=pd.read_csv(files["dcf"]) if files.get("dcf") else None,
+                            lbo_df=pd.read_csv(files["lbo"]) if files.get("lbo") else None,
+                            comps_df=pd.read_csv(files["comps"]) if files.get("comps") else None
+                        )
+                        st.session_state.audit_report = auditor.run_full_audit()
+                        st.session_state.onboarding_complete = True
+                        st.success("Analysis complete!")
+                        st.rerun()
+                    else:
+                        # Pipeline failed - show error, NO fallback to old data
+                        st.error(f"Pipeline failed: {result['error']}")
+                        st.warning("Please fix the issue and re-upload your file. No data will be displayed until processing succeeds.")
+
+                except Exception as e:
+                    # Catch-all for any processing errors - NO fallback to old data
+                    st.error(f"Processing error: {str(e)}")
+                    st.warning("An error occurred during processing. Please check your file and try again.")
+                    # Ensure session state remains clean (no stale data)
+                    st.session_state.pipeline_result = None
+                    st.session_state.audit_report = None
+                    st.session_state.onboarding_complete = False
 
 
 # -------------------------------------------------
