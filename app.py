@@ -27,6 +27,13 @@ from session_manager import SessionManager, cleanup_on_startup
 from run_pipeline import run_pipeline_programmatic
 from validator.ai_auditor import AIAuditor, AuditSeverity
 from utils.brain_manager import BrainManager, get_brain_manager
+from utils.command_engine import (
+    CommandEngine, CommandExecutor, ParseResult, ExecutionResult,
+    get_command_engine, reset_command_engine
+)
+from config.base_commands import (
+    get_commands_by_category, get_action_names, get_backend_actions
+)
 
 # -------------------------------------------------
 # CONFIGURATION
@@ -305,6 +312,24 @@ if 'onboarding_complete' not in st.session_state:
 if 'current_step' not in st.session_state:
     st.session_state.current_step = 1
 
+if 'command_engine' not in st.session_state:
+    st.session_state.command_engine = CommandEngine()
+
+if 'command_executor' not in st.session_state:
+    st.session_state.command_executor = CommandExecutor(st.session_state)
+
+if 'command_history' not in st.session_state:
+    st.session_state.command_history = []
+
+if 'current_tab' not in st.session_state:
+    st.session_state.current_tab = 0
+
+if 'show_teach_me' not in st.session_state:
+    st.session_state.show_teach_me = False
+
+if 'failed_command' not in st.session_state:
+    st.session_state.failed_command = ""
+
 
 # -------------------------------------------------
 # HELPER FUNCTIONS
@@ -352,6 +377,80 @@ def get_severity_color(severity: AuditSeverity) -> str:
         AuditSeverity.PASS: "#10b981",
         AuditSeverity.INFO: "#3b82f6",
     }.get(severity, "#a1a1aa")
+
+
+def phrase_to_regex(phrase: str) -> str:
+    """Convert a natural phrase to a regex pattern."""
+    import re
+    escaped = re.escape(phrase)
+    pattern = re.sub(r'\\{(\w+)\\}', r'(?P<\1>.+?)', escaped)
+    pattern = pattern.replace(r'\ ', r'\s+')
+    pattern = f"^(?i){pattern}$"
+    return pattern
+
+
+def process_command(user_input: str) -> dict:
+    """
+    Process a user command through the engine.
+
+    Returns dict with:
+      - success: bool
+      - message: str
+      - requires_refresh: bool
+      - navigate_to: Optional[str]
+    """
+    engine = st.session_state.command_engine
+    executor = st.session_state.command_executor
+
+    # Parse the command
+    parse_result = engine.parse(user_input)
+
+    if not parse_result.success:
+        # Command not recognized - trigger Teach Me flow
+        st.session_state.show_teach_me = True
+        st.session_state.failed_command = user_input
+        return {
+            "success": False,
+            "message": f"Unknown command: '{user_input}'",
+            "requires_refresh": False,
+            "navigate_to": None
+        }
+
+    # Execute the command
+    exec_result = executor.execute(parse_result)
+
+    # Add to history
+    st.session_state.command_history.append({
+        "input": user_input,
+        "intent": parse_result.intent_id,
+        "action": parse_result.backend_action,
+        "success": exec_result.success,
+        "message": exec_result.message,
+        "timestamp": datetime.now().isoformat()
+    })
+
+    # Handle navigation
+    if exec_result.navigate_to:
+        tab_map = {
+            "audit": 0,
+            "dcf": 1,
+            "lbo": 1,
+            "comps": 1,
+            "data": 2,
+            "unmapped": 3,
+            "downloads": 4,
+            "home": 0
+        }
+        if exec_result.navigate_to.lower() in tab_map:
+            st.session_state.current_tab = tab_map[exec_result.navigate_to.lower()]
+
+    return {
+        "success": exec_result.success,
+        "message": exec_result.message,
+        "requires_refresh": exec_result.requires_refresh,
+        "navigate_to": exec_result.navigate_to,
+        "data": exec_result.data
+    }
 
 
 def create_download_zip(session_id: str) -> bytes:
@@ -468,6 +567,212 @@ def render_sidebar():
         st.divider()
         st.caption("FinanceX Production V1.0")
         st.caption("100% Local | Zero Cloud | BYOB Architecture")
+
+
+# -------------------------------------------------
+# COMMAND INTERFACE - Conversational CLI
+# -------------------------------------------------
+def render_command_interface():
+    """Render the command line interface panel."""
+    st.markdown("""
+    <div class="glass-card" style="border-left: 3px solid #c9a962;">
+        <h3 style="color: #c9a962; margin: 0 0 16px 0;">Command Terminal</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Command input
+    user_input = st.text_input(
+        "Enter command",
+        placeholder="e.g., Map Sales to Revenue, Show DCF, Set EBITDA to 500000",
+        key="command_input",
+        label_visibility="collapsed"
+    )
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        execute_btn = st.button("Execute", type="primary", use_container_width=True)
+    with col2:
+        help_btn = st.button("?", help="Show command help")
+
+    if help_btn:
+        with st.expander("Command Examples", expanded=True):
+            st.markdown("""
+            **Mapping:**
+            - `Map [label] to Revenue`
+            - `Set [label] as EBITDA`
+            - `Define [label] is Net Income`
+
+            **Navigation:**
+            - `Show DCF` / `Show LBO` / `Show Comps`
+            - `Show warnings` / `Show data`
+
+            **Overrides:**
+            - `Set EBITDA to 500000`
+            - `Fix revenue to 1000000`
+
+            **Auditing:**
+            - `Ignore warning [name]`
+            - `Why [issue]`
+
+            **Pipeline:**
+            - `Force generate`
+            - `Rerun`
+            - `Export all`
+
+            **Brain:**
+            - `Download brain`
+            - `Show brain stats`
+            """)
+
+    # Process command on button click or enter
+    if execute_btn and user_input.strip():
+        result = process_command(user_input.strip())
+
+        if result["success"]:
+            st.success(f"OK: {result['message']}")
+            if result["requires_refresh"]:
+                st.rerun()
+        else:
+            st.error(result["message"])
+            # Show Teach Me wizard
+            render_teach_me_wizard()
+
+    # Show Teach Me wizard if triggered
+    if st.session_state.show_teach_me and not (execute_btn and user_input.strip()):
+        render_teach_me_wizard()
+
+    # Command history
+    if st.session_state.command_history:
+        with st.expander("Recent Commands", expanded=False):
+            for cmd in reversed(st.session_state.command_history[-10:]):
+                status_icon = "+" if cmd["success"] else "x"
+                st.markdown(f"`{status_icon}` **{cmd['input']}** -> {cmd['message']}")
+
+
+def render_teach_me_wizard():
+    """Render the Teach Me wizard for defining new commands."""
+    if not st.session_state.show_teach_me:
+        return
+
+    st.markdown("""
+    <div class="glass-card" style="border: 1px solid #f59e0b; margin-top: 16px;">
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px;">
+            <span style="font-size: 1.5rem;">+</span>
+            <span style="color: #f59e0b; font-weight: 600;">Define New Command</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.form("teach_me_form"):
+        # Field 1: The Phrase (auto-filled with failed input)
+        phrase = st.text_input(
+            "Command Phrase",
+            value=st.session_state.failed_command,
+            help="The phrase to recognize. Use {placeholder} for variable parts."
+        )
+
+        st.caption("Use `{name}` for placeholders. Example: `Fix {metric} to {value}`")
+
+        # Field 2: The Action (dropdown)
+        actions = get_action_names()
+        action_info = get_backend_actions()
+
+        # Group actions by category for easier selection
+        action_categories = {}
+        for action in actions:
+            cat = action_info.get(action, {}).get("category", "Other")
+            if cat not in action_categories:
+                action_categories[cat] = []
+            action_categories[cat].append(action)
+
+        selected_action = st.selectbox(
+            "Backend Action",
+            options=actions,
+            format_func=lambda x: f"{x} - {action_info.get(x, {}).get('description', '')}"[:60],
+            help="What should this command do?"
+        )
+
+        # Show action details
+        if selected_action:
+            info = action_info.get(selected_action, {})
+            st.info(f"**{info.get('description', 'No description')}** (Category: {info.get('category', 'Other')})")
+
+            required_params = info.get("required_params", [])
+            optional_params = info.get("optional_params", [])
+
+            if required_params or optional_params:
+                st.markdown("**Parameters:**")
+                if required_params:
+                    st.markdown(f"Required: `{', '.join(required_params)}`")
+                if optional_params:
+                    st.markdown(f"Optional: `{', '.join(optional_params)}`")
+
+        # Field 3: Fixed Parameters (optional)
+        st.markdown("**Fixed Parameters** (optional)")
+        param_col1, param_col2 = st.columns(2)
+        with param_col1:
+            param_key = st.text_input("Parameter Name", placeholder="e.g., target")
+        with param_col2:
+            param_value = st.text_input("Parameter Value", placeholder="e.g., us-gaap_Revenues")
+
+        # Submit buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            save_execute = st.form_submit_button("Save & Execute", type="primary")
+        with col2:
+            cancel = st.form_submit_button("Cancel")
+
+        if cancel:
+            st.session_state.show_teach_me = False
+            st.session_state.failed_command = ""
+            st.rerun()
+
+        if save_execute and phrase and selected_action:
+            # Build fixed params
+            fixed_params = {}
+            if param_key and param_value:
+                fixed_params[param_key] = param_value
+
+            # Generate intent ID
+            import re
+            clean_phrase = re.sub(r'[^a-zA-Z0-9\s]', '', phrase)
+            intent_id = "USER_" + "_".join(clean_phrase.upper().split())[:50]
+
+            # Generate regex pattern
+            regex_pattern = phrase_to_regex(phrase)
+
+            # Add to brain manager
+            st.session_state.brain_manager.add_custom_command(
+                intent_id=intent_id,
+                canonical_phrase=phrase,
+                regex_pattern=regex_pattern,
+                backend_action=selected_action,
+                fixed_params=fixed_params
+            )
+
+            # Add to command engine
+            success, msg, cmd = st.session_state.command_engine.add_user_command(
+                phrase=phrase,
+                backend_action=selected_action,
+                params=fixed_params,
+                intent_id=intent_id
+            )
+
+            if success:
+                st.success(f"Command learned: '{phrase}'")
+
+                # Execute immediately
+                result = process_command(phrase)
+                if result["success"]:
+                    st.success(f"Executed: {result['message']}")
+
+                st.session_state.show_teach_me = False
+                st.session_state.failed_command = ""
+
+                st.info("Download your Brain to save this command permanently.")
+                st.rerun()
+            else:
+                st.error(f"Could not save command: {msg}")
 
 
 # -------------------------------------------------
@@ -1085,7 +1390,38 @@ def main():
     if not st.session_state.onboarding_complete:
         render_onboarding()
     else:
-        render_analyst_cockpit()
+        # Split layout: Main content (left) + Command Interface (right)
+        main_col, cmd_col = st.columns([3, 1])
+
+        with main_col:
+            render_analyst_cockpit()
+
+        with cmd_col:
+            render_command_interface()
+
+            # Command stats
+            engine = st.session_state.command_engine
+            stats = engine.get_command_stats()
+
+            st.divider()
+            st.markdown("**Engine Stats**")
+            st.caption(f"Base: {stats['base_commands']} | Custom: {stats['user_commands']}")
+
+            # Quick actions
+            st.markdown("**Quick Actions**")
+            if st.button("List Commands", use_container_width=True, key="quick_list"):
+                categories = get_commands_by_category()
+                with st.expander("All Commands", expanded=True):
+                    for cat, cmds in categories.items():
+                        st.markdown(f"**{cat}** ({len(cmds)})")
+                        for cmd in cmds[:3]:
+                            st.caption(f"  {cmd['canonical_phrase']}")
+                        if len(cmds) > 3:
+                            st.caption(f"  ... and {len(cmds) - 3} more")
+
+            if st.button("Clear History", use_container_width=True, key="quick_clear"):
+                st.session_state.command_history = []
+                st.rerun()
 
 
 if __name__ == "__main__":

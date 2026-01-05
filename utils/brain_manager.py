@@ -46,13 +46,26 @@ class MappingEntry:
 @dataclass
 class BrainMetadata:
     """Metadata about the brain file."""
-    version: str = "1.0"
+    version: str = "2.0"
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_modified: str = field(default_factory=lambda: datetime.now().isoformat())
     owner: str = "anonymous"
     company: str = ""
     total_mappings: int = 0
     total_validations: int = 0
+    total_commands: int = 0
+
+
+@dataclass
+class CustomCommand:
+    """A user-defined command in the brain."""
+    intent_id: str
+    canonical_phrase: str
+    regex_pattern: str
+    backend_action: str
+    fixed_params: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    created_by: str = "user"
 
 
 @dataclass
@@ -89,6 +102,7 @@ class BrainManager:
         self.metadata = BrainMetadata()
         self.mappings: Dict[str, MappingEntry] = {}
         self.validation_preferences: Dict[str, ValidationPreference] = {}
+        self.custom_commands: Dict[str, CustomCommand] = {}
         self.session_history: List[Dict[str, Any]] = []
         self.default_aliases_path = default_aliases_path
 
@@ -149,6 +163,19 @@ class BrainManager:
             if 'session_history' in data:
                 self.session_history = data['session_history']
 
+            # Load custom commands
+            if 'custom_commands' in data:
+                for key, cmd in data['custom_commands'].items():
+                    self.custom_commands[key] = CustomCommand(
+                        intent_id=cmd.get('intent_id', key),
+                        canonical_phrase=cmd.get('canonical_phrase', ''),
+                        regex_pattern=cmd.get('regex_pattern', ''),
+                        backend_action=cmd.get('backend_action', ''),
+                        fixed_params=cmd.get('fixed_params', {}),
+                        created_at=cmd.get('created_at', datetime.now().isoformat()),
+                        created_by=cmd.get('created_by', 'user')
+                    )
+
             self._rebuild_merged_mappings()
             return True
 
@@ -201,11 +228,13 @@ class BrainManager:
             self.metadata.last_modified = datetime.now().isoformat()
             self.metadata.total_mappings = len(self.mappings)
             self.metadata.total_validations = len(self.validation_preferences)
+            self.metadata.total_commands = len(self.custom_commands)
 
             data = {
                 'metadata': asdict(self.metadata),
                 'mappings': {k: asdict(v) for k, v in self.mappings.items()},
                 'validation_preferences': {k: asdict(v) for k, v in self.validation_preferences.items()},
+                'custom_commands': {k: asdict(v) for k, v in self.custom_commands.items()},
                 'session_history': self.session_history[-100:]  # Keep last 100 entries
             }
 
@@ -228,11 +257,13 @@ class BrainManager:
         self.metadata.last_modified = datetime.now().isoformat()
         self.metadata.total_mappings = len(self.mappings)
         self.metadata.total_validations = len(self.validation_preferences)
+        self.metadata.total_commands = len(self.custom_commands)
 
         data = {
             'metadata': asdict(self.metadata),
             'mappings': {k: asdict(v) for k, v in self.mappings.items()},
             'validation_preferences': {k: asdict(v) for k, v in self.validation_preferences.items()},
+            'custom_commands': {k: asdict(v) for k, v in self.custom_commands.items()},
             'session_history': self.session_history[-100:]
         }
 
@@ -396,10 +427,98 @@ class BrainManager:
             'total_user_mappings': len(self.mappings),
             'total_merged_mappings': len(self._merged_mappings),
             'validation_preferences': len(self.validation_preferences),
+            'custom_commands': len(self.custom_commands),
             'session_actions': len(self.session_history),
             'last_modified': self.metadata.last_modified,
             'owner': self.metadata.owner,
             'company': self.metadata.company
+        }
+
+    # =========================================================================
+    # COMMAND MANAGEMENT (Teach Me Flow)
+    # =========================================================================
+    def add_custom_command(
+        self,
+        intent_id: str,
+        canonical_phrase: str,
+        regex_pattern: str,
+        backend_action: str,
+        fixed_params: Dict[str, Any] = None
+    ) -> bool:
+        """
+        Add a custom command to the brain.
+
+        Args:
+            intent_id: Unique identifier for the command
+            canonical_phrase: Human-readable phrase template
+            regex_pattern: Regex pattern to match input
+            backend_action: Action to execute
+            fixed_params: Optional fixed parameters
+
+        Returns:
+            bool: True if added successfully
+        """
+        fixed_params = fixed_params or {}
+
+        self.custom_commands[intent_id] = CustomCommand(
+            intent_id=intent_id,
+            canonical_phrase=canonical_phrase,
+            regex_pattern=regex_pattern,
+            backend_action=backend_action,
+            fixed_params=fixed_params,
+            created_at=datetime.now().isoformat(),
+            created_by="user"
+        )
+
+        self.session_history.append({
+            'action': 'add_command',
+            'timestamp': datetime.now().isoformat(),
+            'intent_id': intent_id,
+            'phrase': canonical_phrase
+        })
+
+        return True
+
+    def remove_custom_command(self, intent_id: str) -> bool:
+        """
+        Remove a custom command from the brain.
+
+        Args:
+            intent_id: The command ID to remove
+
+        Returns:
+            bool: True if removed
+        """
+        if intent_id in self.custom_commands:
+            del self.custom_commands[intent_id]
+
+            self.session_history.append({
+                'action': 'remove_command',
+                'timestamp': datetime.now().isoformat(),
+                'intent_id': intent_id
+            })
+            return True
+
+        return False
+
+    def get_custom_command(self, intent_id: str) -> Optional[CustomCommand]:
+        """Get a custom command by ID."""
+        return self.custom_commands.get(intent_id)
+
+    def get_all_custom_commands(self) -> Dict[str, CustomCommand]:
+        """Get all custom commands."""
+        return self.custom_commands.copy()
+
+    def get_custom_commands_for_engine(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Export custom commands in format suitable for CommandEngine.
+
+        Returns:
+            Dict mapping intent_id to command data dict
+        """
+        return {
+            intent_id: asdict(cmd)
+            for intent_id, cmd in self.custom_commands.items()
         }
 
     def set_owner(self, owner: str, company: str = ""):
