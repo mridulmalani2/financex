@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
 """
-FinanceX: Unified End-to-End Pipeline
-======================================
+FinanceX: Production V1.0 - Unified End-to-End Pipeline
+=========================================================
 Automated Financial Workbench for Investment Banking
 
-This script runs the complete pipeline:
+PRODUCTION V1.0 - CLEAN SLATE ARCHITECTURE:
+├── temp_session/      Created on launch, wiped on exit. Stores current upload.
+├── taxonomy/          ReadOnly DB. XBRL taxonomy data.
+├── output/            Stores final models (DCF, LBO, Comps).
+└── logs/              Stores the "Thinking" logs from the iterative engine.
+
+NO TEST FILES: This pipeline only processes user-uploaded files.
+               References to client_upload.xlsx have been removed.
+
+Pipeline Stages:
   1. Extract data from Excel (Extractor)
   2. Map and normalize to XBRL taxonomy (Normalizer)
-  3. Generate IB-ready datasets (Engine)
+  3. Generate IB-ready datasets via Iterative Thinking Engine
   4. Validate and quality check (Validation)
 
 Usage:
   python run_pipeline.py <excel_file.xlsx> [--output-dir <dir>]
 
 Example:
-  python run_pipeline.py client_financials.xlsx
+  python run_pipeline.py user_financials.xlsx
   python run_pipeline.py apple_10k.xlsx --output-dir ./apple_models
-
-Output:
-  <output_dir>/
-    ├── messy_input.csv              (Raw extracted data)
-    ├── normalized_financials.csv    (XBRL-mapped data)
-    ├── final_ib_models/
-    │   ├── DCF_Historical_Setup.csv
-    │   ├── LBO_Credit_Stats.csv
-    │   ├── Comps_Trading_Metrics.csv
-    │   └── Validation_Report.csv
 """
 import os
 import sys
@@ -35,6 +34,18 @@ from datetime import datetime
 # Ensure imports work
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
+
+# Import Clean Slate architecture
+from session_manager import (
+    initialize_clean_slate,
+    get_clean_slate_paths,
+    write_thinking_log,
+    append_thinking_log,
+    TEMP_SESSION_DIR,
+    OUTPUT_DIR,
+    LOGS_DIR,
+    TAXONOMY_DIR
+)
 
 
 def print_banner():
@@ -90,7 +101,11 @@ def run_normalizer(messy_file: str, output_dir: str) -> str:
     print("STAGE 2: NORMALIZATION & MAPPING")
     print("=" * 70)
 
-    db_path = os.path.join(BASE_DIR, "output", "taxonomy_2025.db")
+    # Use Clean Slate taxonomy path (falls back to output for DB)
+    db_path = os.path.join(OUTPUT_DIR, "taxonomy_2025.db")
+    if not os.path.exists(db_path):
+        # Try taxonomy directory
+        db_path = os.path.join(TAXONOMY_DIR, "taxonomy_2025.db")
     alias_path = os.path.join(BASE_DIR, "config", "aliases.csv")
     output_file = os.path.join(output_dir, "normalized_financials.csv")
 
@@ -326,7 +341,7 @@ def run_pipeline_programmatic(excel_path: str, output_dir: str,
 
 
 def main():
-    """Main entry point."""
+    """Main entry point with Clean Slate architecture."""
     parser = argparse.ArgumentParser(
         description="FinanceX: Automated Financial Workbench for Investment Banking"
     )
@@ -336,8 +351,13 @@ def main():
     )
     parser.add_argument(
         "--output-dir", "-o",
-        default=BASE_DIR,
-        help="Output directory (default: current directory)"
+        default=None,
+        help="Output directory (default: output/)"
+    )
+    parser.add_argument(
+        "--clean-slate",
+        action="store_true",
+        help="Initialize clean slate directories on startup"
     )
 
     args = parser.parse_args()
@@ -347,23 +367,45 @@ def main():
         print(f"ERROR: File not found: {args.excel_file}")
         return 1
 
+    # Initialize Clean Slate if requested
+    if args.clean_slate:
+        initialize_clean_slate()
+
+    # Use Clean Slate output directory by default
+    output_dir = args.output_dir if args.output_dir else OUTPUT_DIR
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "final_ib_models"), exist_ok=True)
+
     # Print banner
     print_banner()
 
     start_time = datetime.now()
     print(f"Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Input File: {args.excel_file}")
-    print(f"Output Directory: {args.output_dir}")
+    print(f"Output Directory: {output_dir}")
+
+    # Start thinking log
+    thinking_log = os.path.join(LOGS_DIR, "pipeline_thinking.log")
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    append_thinking_log(f"Pipeline started for: {args.excel_file}", thinking_log)
 
     try:
         # Stage 1: Extract
-        messy_file = run_extractor(args.excel_file, args.output_dir)
+        append_thinking_log("Stage 1: Beginning extraction...", thinking_log)
+        messy_file = run_extractor(args.excel_file, output_dir)
+        append_thinking_log(f"Stage 1 complete: {messy_file}", thinking_log)
 
         # Stage 2: Normalize
-        normalized_file = run_normalizer(messy_file, args.output_dir)
+        append_thinking_log("Stage 2: Beginning normalization...", thinking_log)
+        normalized_file = run_normalizer(messy_file, output_dir)
+        append_thinking_log(f"Stage 2 complete: {normalized_file}", thinking_log)
 
-        # Stage 3: Generate Models
-        outputs = run_engine(normalized_file, args.output_dir)
+        # Stage 3: Generate Models (with Iterative Thinking Engine)
+        append_thinking_log("Stage 3: Beginning financial modeling with Iterative Thinking Engine...", thinking_log)
+        outputs = run_engine(normalized_file, output_dir)
+        append_thinking_log(f"Stage 3 complete: Generated {len(outputs)} outputs", thinking_log)
 
         # Summary
         end_time = datetime.now()
@@ -378,16 +420,20 @@ def main():
         print(f"  - {outputs.get('lbo', 'N/A')}")
         print(f"  - {outputs.get('comps', 'N/A')}")
         print(f"  - {outputs.get('validation', 'N/A')}")
+        print(f"\nThinking Log: {thinking_log}")
         print("\nThese files are JPMC/Citadel-grade and ready for:")
         print("  - DCF Valuation Modeling")
         print("  - LBO / Leverage Analysis")
         print("  - Trading Comparables Analysis")
         print("=" * 70)
 
+        append_thinking_log(f"Pipeline complete. Duration: {duration:.1f}s", thinking_log)
         return 0
 
     except Exception as e:
-        print(f"\nERROR: Pipeline failed - {e}")
+        error_msg = f"Pipeline failed - {e}"
+        print(f"\nERROR: {error_msg}")
+        append_thinking_log(f"ERROR: {error_msg}", thinking_log)
         import traceback
         traceback.print_exc()
         return 1

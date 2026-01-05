@@ -6,7 +6,15 @@ messy_input.csv
 normalized_financials.csv
 client_upload.xlsx
 
-# Temp Sessions (user uploads and intermediate files)
+# Clean Slate Architecture - Production V1.0
+temp_session/
+!temp_session/.gitkeep
+logs/
+!logs/.gitkeep
+taxonomy/
+!taxonomy/.gitkeep
+
+# Legacy Temp Sessions
 temp_sessions/
 !temp_sessions/.gitkeep
 

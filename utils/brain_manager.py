@@ -1,26 +1,40 @@
 #!/usr/bin/env python3
 """
-Brain Manager - Analyst Brain (BYOB Architecture)
-==================================================
+Brain Manager - Analyst Brain (BYOB Architecture) - Production V1.0
+====================================================================
 Implements "Bring Your Own Brain" portable JSON memory system for FinanceX.
 
+PRODUCTION V1.0 - ANALYST BRAIN LOADER
+======================================
+This module provides the Analyst Brain Loader with the following guarantees:
+
+1. LOADS JSON FILE - Brain can be loaded from any JSON file
+2. MERGES WITH ALIASES.CSV - Brain mappings are merged with default aliases
+3. USER BRAIN OVERRIDES DEFAULTS - User's Brain JSON ALWAYS wins on conflicts
+
 The Analyst Brain is a JSON file that contains:
-1. User-defined mapping corrections (overrides default aliases)
-2. Custom synonyms and aliases learned from user input
-3. Validation preferences and thresholds
-4. Session history and audit trail
+- User-defined mapping corrections (overrides default aliases)
+- Custom synonyms and aliases learned from user input
+- Validation preferences and thresholds
+- Custom commands defined via "Teach Me" wizard
+- Session history and audit trail
 
 ARCHITECTURE:
 - No database required
 - Portable JSON file that travels with the analyst
-- Merges with default aliases (user memory always wins)
+- Merges with default aliases (USER BRAIN ALWAYS WINS ON CONFLICTS)
 - Can be uploaded, modified, and downloaded
 
+MERGE PRIORITY (Highest to Lowest):
+1. User Brain mappings (from loaded JSON)
+2. Default aliases.csv mappings
+
 Usage:
-    brain = BrainManager()
-    brain.load_from_file("analyst_brain.json")  # Optional
-    brain.add_mapping("My Custom Label", "us-gaap_Revenues")
-    brain.save_to_file("updated_brain.json")
+    brain = BrainManager("/path/to/aliases.csv")
+    brain.load_from_file("analyst_brain.json")  # Load user brain
+    mapping = brain.get_mapping("My Custom Label")  # User brain checked first
+    brain.add_mapping("New Label", "us-gaap_Revenues")  # Added to user brain
+    brain.save_to_file("updated_brain.json")  # Export updated brain
 """
 
 import json
@@ -368,13 +382,21 @@ class BrainManager:
         """
         Rebuild the merged mappings view.
 
-        Order of precedence:
-        1. User brain mappings (highest priority)
-        2. Default aliases from aliases.csv
+        CRITICAL: USER BRAIN ALWAYS OVERRIDES DEFAULTS
+
+        Order of precedence (applied in this order):
+        1. Load default aliases from aliases.csv (base layer)
+        2. Apply user brain mappings ON TOP (user mappings WIN on conflicts)
+
+        Example:
+            aliases.csv: "Revenue" -> "us-gaap_Revenues"
+            User brain:  "Revenue" -> "us-gaap_SalesRevenueNet"
+            Result:      "Revenue" -> "us-gaap_SalesRevenueNet" (user wins)
         """
         self._merged_mappings = {}
 
-        # Load defaults first
+        # STEP 1: Load defaults first (base layer)
+        default_count = 0
         if self.default_aliases_path and os.path.exists(self.default_aliases_path):
             try:
                 with open(self.default_aliases_path, 'r', encoding='utf-8') as f:
@@ -385,12 +407,20 @@ class BrainManager:
                             source_taxonomy, alias, element_id = row[0], row[1], row[2]
                             key = alias.lower().strip()
                             self._merged_mappings[key] = element_id
+                            default_count += 1
             except Exception as e:
                 print(f"Warning: Could not load default aliases: {e}")
 
-        # User mappings override defaults
+        # STEP 2: User brain mappings OVERRIDE defaults (user always wins)
+        user_override_count = 0
         for key, entry in self.mappings.items():
+            if key in self._merged_mappings:
+                user_override_count += 1
             self._merged_mappings[key] = entry.target_element_id
+
+        # Log merge stats
+        if user_override_count > 0:
+            print(f"[Brain] Merged: {default_count} defaults + {len(self.mappings)} user mappings ({user_override_count} overrides)")
 
     def set_validation_preference(self, check_name: str, severity_override: str = "",
                                    threshold_override: float = 0.0, enabled: bool = True):
@@ -623,3 +653,99 @@ def reset_brain_manager():
     """Reset the singleton instance (for testing)."""
     global _brain_instance
     _brain_instance = None
+
+
+# =============================================================================
+# CONVENIENCE FUNCTIONS - Analyst Brain Loader API
+# =============================================================================
+
+def load_brain_and_merge(
+    brain_json_path: str,
+    aliases_csv_path: str = None
+) -> BrainManager:
+    """
+    Load a Brain JSON file and merge with default aliases.csv.
+
+    This is the primary entry point for the Analyst Brain Loader.
+
+    GUARANTEE: User's Brain JSON ALWAYS overrides default rules.
+
+    Args:
+        brain_json_path: Path to the analyst brain JSON file
+        aliases_csv_path: Path to default aliases.csv (optional)
+
+    Returns:
+        BrainManager: Loaded and merged brain manager
+
+    Example:
+        brain = load_brain_and_merge(
+            "analyst_brain.json",
+            "config/aliases.csv"
+        )
+        # User brain mappings will override aliases.csv mappings
+        mapping = brain.get_mapping("Custom Revenue Label")
+    """
+    brain = BrainManager(aliases_csv_path)
+
+    # Load the brain JSON
+    if os.path.exists(brain_json_path):
+        success = brain.load_from_file(brain_json_path)
+        if success:
+            print(f"[Brain Loader] Loaded brain from: {brain_json_path}")
+            print(f"[Brain Loader] User mappings: {len(brain.mappings)}")
+            print(f"[Brain Loader] Custom commands: {len(brain.custom_commands)}")
+        else:
+            print(f"[Brain Loader] Warning: Could not load brain from: {brain_json_path}")
+    else:
+        print(f"[Brain Loader] No brain file found at: {brain_json_path} (using defaults only)")
+
+    # The merge happens automatically in load_from_file via _rebuild_merged_mappings
+    print(f"[Brain Loader] Total merged mappings: {len(brain.get_merged_mappings())}")
+
+    return brain
+
+
+def load_brain_from_json_string(
+    json_string: str,
+    aliases_csv_path: str = None
+) -> BrainManager:
+    """
+    Load a Brain from a JSON string and merge with default aliases.csv.
+
+    Use this for handling uploaded brain files in web interfaces.
+
+    GUARANTEE: User's Brain JSON ALWAYS overrides default rules.
+
+    Args:
+        json_string: JSON string containing brain data
+        aliases_csv_path: Path to default aliases.csv (optional)
+
+    Returns:
+        BrainManager: Loaded and merged brain manager
+    """
+    brain = BrainManager(aliases_csv_path)
+
+    success = brain.load_from_json_string(json_string)
+    if success:
+        print(f"[Brain Loader] Loaded brain from JSON string")
+        print(f"[Brain Loader] User mappings: {len(brain.mappings)}")
+    else:
+        print(f"[Brain Loader] Warning: Could not parse brain JSON")
+
+    return brain
+
+
+def create_brain_with_defaults(aliases_csv_path: str) -> BrainManager:
+    """
+    Create a new BrainManager with only default aliases loaded.
+
+    Args:
+        aliases_csv_path: Path to default aliases.csv
+
+    Returns:
+        BrainManager: Brain with only defaults (no user mappings)
+    """
+    brain = BrainManager(aliases_csv_path)
+    brain._rebuild_merged_mappings()
+    print(f"[Brain Loader] Created brain with {len(brain.get_merged_mappings())} default mappings")
+    return brain

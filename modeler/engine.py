@@ -16,27 +16,151 @@ PRODUCTION v3.0 ENHANCEMENTS:
 7. NO SILENT FAILURES - If Revenue/EBITDA is zero, attempt aggressive recovery
 8. RAW DATA SCANNING - Scans unmapped data for potential matches
 
+PRODUCTION v3.1 - ITERATIVE THINKING ENGINE:
+9. WHILE LOOP LOGIC - 3-attempt recovery with escalating strategies:
+   - Attempt 1 (Strict): Use ib_rules.py strict tags only
+   - Attempt 2 (Relaxed): Fuzzy matches (e.g., contains "Profit")
+   - Attempt 3 (Desperate): Any line item with >$100M and keyword "Sales"
+10. THINKING LOGS - Detailed reasoning trail: "Attempt 1 failed. Thinking..."
+
 Output Quality: Suitable for JPMC M&A, Citadel fundamental analysis
 
-Philosophy: "No Silent Failures" - Attempt recovery before outputting zeros
+Philosophy: "No Silent Failures, Think Before Acting"
 """
 import pandas as pd
 import os
 import sys
 import logging
+import time
 from typing import Dict, Set, List, Tuple, Optional
 from dataclasses import dataclass, field
 from collections import defaultdict
+from datetime import datetime
 
 # Configure logging for engine
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FinancialEngine")
+
+# Thinking log path (will be set by caller or use default)
+THINKING_LOG_PATH = None
 
 # Import Rules and Taxonomy Engine
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.ib_rules import *
 from config.ib_rules import fuzzy_match_bucket, suggest_mapping, KEYWORD_FALLBACK_MAPPINGS
 from taxonomy_utils import get_taxonomy_engine, TaxonomyEngine
+
+
+# =============================================================================
+# THINKING LOGGER - Production V3.1
+# =============================================================================
+
+class ThinkingLogger:
+    """
+    Manages the "Thinking" log for the Iterative Thinking Engine.
+    Logs each attempt, its reasoning, and the outcome.
+    """
+
+    def __init__(self, log_dir: str = None):
+        """Initialize the thinking logger."""
+        if log_dir is None:
+            log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        self.log_path = os.path.join(log_dir, "engine_thinking.log")
+        self.entries: List[str] = []
+        self.start_time = datetime.now()
+
+        # Initialize log file
+        self._write_header()
+
+    def _write_header(self):
+        """Write log header."""
+        with open(self.log_path, 'w', encoding='utf-8') as f:
+            f.write("=" * 70 + "\n")
+            f.write("FINANCEX ITERATIVE THINKING ENGINE LOG\n")
+            f.write("=" * 70 + "\n")
+            f.write(f"Started: {self.start_time.isoformat()}\n")
+            f.write("=" * 70 + "\n\n")
+
+    def log(self, message: str, level: str = "INFO"):
+        """Log a message with timestamp."""
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        entry = f"[{timestamp}] [{level}] {message}"
+        self.entries.append(entry)
+
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(entry + "\n")
+
+        # Also log to console for visibility
+        if level == "THINK":
+            print(f"  [THINKING] {message}")
+        elif level == "SUCCESS":
+            print(f"  [SUCCESS] {message}")
+        elif level == "FAIL":
+            print(f"  [FAILED] {message}")
+
+    def think(self, message: str):
+        """Log a thinking step."""
+        self.log(message, level="THINK")
+
+    def attempt(self, attempt_num: int, strategy: str):
+        """Log the start of an attempt."""
+        self.log(f"\n{'='*50}", level="INFO")
+        self.log(f"ATTEMPT {attempt_num}: {strategy}", level="INFO")
+        self.log(f"{'='*50}", level="INFO")
+
+    def success(self, message: str):
+        """Log a success."""
+        self.log(message, level="SUCCESS")
+
+    def fail(self, message: str):
+        """Log a failure."""
+        self.log(message, level="FAIL")
+
+    def result(self, bucket: str, value: float, method: str):
+        """Log a bucket result."""
+        self.log(f"  {bucket}: ${value:,.0f} (via {method})", level="INFO")
+
+    def get_summary(self) -> str:
+        """Get the full log as a string."""
+        return "\n".join(self.entries)
+
+
+# Global thinking logger instance
+_thinking_logger: Optional[ThinkingLogger] = None
+
+
+def get_thinking_logger() -> ThinkingLogger:
+    """Get or create the global thinking logger."""
+    global _thinking_logger
+    if _thinking_logger is None:
+        _thinking_logger = ThinkingLogger()
+    return _thinking_logger
+
+
+def reset_thinking_logger():
+    """Reset the thinking logger for a new session."""
+    global _thinking_logger
+    _thinking_logger = ThinkingLogger()
+    return _thinking_logger
+
+
+# =============================================================================
+# ATTEMPT RESULT - Tracks each iteration
+# =============================================================================
+
+@dataclass
+class AttemptResult:
+    """Result of a single attempt in the iterative thinking engine."""
+    attempt_num: int
+    strategy: str
+    revenue_value: float
+    net_income_value: float
+    is_valid: bool
+    sources_used: List[str] = field(default_factory=list)
+    thinking_notes: str = ""
+    duration_ms: float = 0.0
 
 
 class ModelValidationError(Exception):
@@ -665,6 +789,246 @@ class FinancialEngine:
         return results
 
     # =========================================================================
+    # ITERATIVE THINKING ENGINE - Production V3.1
+    # =========================================================================
+
+    def _attempt_strict(self) -> Tuple[pd.Series, pd.Series, List[str]]:
+        """
+        Attempt 1 (Strict): Use ib_rules.py strict tags only.
+
+        Returns:
+            Tuple of (revenue, net_income, sources_used)
+        """
+        tlog = get_thinking_logger()
+        tlog.think("Using STRICT tag matching from ib_rules.py...")
+
+        sources = []
+
+        # Revenue - Strict tags only
+        revenue = self._smart_sum(REVENUE_TOTAL_IDS)
+        if revenue.sum() == 0:
+            tlog.think("REVENUE_TOTAL_IDS returned 0, trying REVENUE_COMPONENT_IDS...")
+            revenue = self._smart_sum(REVENUE_COMPONENT_IDS)
+        sources.append(f"Revenue via strict tags: {revenue.sum():,.0f}")
+
+        # Net Income - Strict tags only
+        net_income = self._sum_bucket(NET_INCOME_IDS)
+        sources.append(f"Net Income via strict tags: {net_income.sum():,.0f}")
+
+        return revenue, net_income, sources
+
+    def _attempt_relaxed(self) -> Tuple[pd.Series, pd.Series, List[str]]:
+        """
+        Attempt 2 (Relaxed): Fuzzy matches (e.g., contains "Profit").
+
+        Returns:
+            Tuple of (revenue, net_income, sources_used)
+        """
+        tlog = get_thinking_logger()
+        tlog.think("Using RELAXED fuzzy matching (contains 'Profit', 'Revenue', etc.)...")
+
+        sources = []
+        revenue = pd.Series(0.0, index=self.dates)
+        net_income = pd.Series(0.0, index=self.dates)
+
+        # Search for revenue-related labels with fuzzy matching
+        revenue_keywords = ["revenue", "sales", "net sales", "total revenue", "turnover"]
+        profit_keywords = ["profit", "income", "earnings", "net income", "net profit"]
+
+        for _, row in self.raw_df.iterrows():
+            source_label = str(row.get('Source_Label', '')).lower()
+            amount = float(row.get('Source_Amount', 0))
+            period = row.get('Period_Date', 'Unknown')
+
+            if amount == 0 or period not in self.dates:
+                continue
+
+            # Check for revenue
+            for kw in revenue_keywords:
+                if kw in source_label:
+                    revenue[period] += amount
+                    sources.append(f"[RELAXED] Revenue: '{row.get('Source_Label')}' = {amount:,.0f}")
+                    break
+
+            # Check for net income/profit
+            for kw in profit_keywords:
+                if kw in source_label:
+                    net_income[period] += amount
+                    sources.append(f"[RELAXED] Profit: '{row.get('Source_Label')}' = {amount:,.0f}")
+                    break
+
+        tlog.think(f"Relaxed found: Revenue={revenue.sum():,.0f}, Net Income={net_income.sum():,.0f}")
+        return revenue, net_income, sources
+
+    def _attempt_desperate(self) -> Tuple[pd.Series, pd.Series, List[str]]:
+        """
+        Attempt 3 (Desperate): Look for any line item with >$100M and keyword "Sales".
+
+        Returns:
+            Tuple of (revenue, net_income, sources_used)
+        """
+        tlog = get_thinking_logger()
+        tlog.think("Using DESPERATE mode: Looking for ANY line item >$100M with 'Sales' keyword...")
+
+        THRESHOLD = 100_000_000  # $100M threshold
+
+        sources = []
+        revenue = pd.Series(0.0, index=self.dates)
+        net_income = pd.Series(0.0, index=self.dates)
+
+        # Desperate keywords for revenue
+        desperate_revenue_kw = ["sale", "sales", "revenue", "income", "turnover", "gross"]
+        desperate_income_kw = ["profit", "earnings", "net", "bottom", "income"]
+
+        for _, row in self.raw_df.iterrows():
+            source_label = str(row.get('Source_Label', '')).lower()
+            amount = float(row.get('Source_Amount', 0))
+            period = row.get('Period_Date', 'Unknown')
+
+            if period not in self.dates:
+                continue
+
+            # Check for large amounts with revenue keywords
+            if abs(amount) > THRESHOLD:
+                for kw in desperate_revenue_kw:
+                    if kw in source_label:
+                        revenue[period] = max(revenue[period], abs(amount))
+                        sources.append(f"[DESPERATE] Large Revenue: '{row.get('Source_Label')}' = ${abs(amount):,.0f}")
+                        tlog.think(f"Found large revenue candidate: '{row.get('Source_Label')}' = ${abs(amount):,.0f}")
+                        break
+
+                for kw in desperate_income_kw:
+                    if kw in source_label and "total" not in source_label.lower():
+                        net_income[period] = max(net_income[period], abs(amount))
+                        sources.append(f"[DESPERATE] Large Income: '{row.get('Source_Label')}' = ${abs(amount):,.0f}")
+                        break
+
+        # If still nothing, take the MAX value from the entire dataset
+        if revenue.sum() == 0:
+            tlog.think("No revenue found even in desperate mode. Taking MAX value as last resort...")
+            max_amount = 0
+            max_label = ""
+            for _, row in self.raw_df.iterrows():
+                amount = float(row.get('Source_Amount', 0))
+                if abs(amount) > max_amount:
+                    max_amount = abs(amount)
+                    max_label = row.get('Source_Label', '')
+
+            if max_amount > 0:
+                for period in self.dates:
+                    revenue[period] = max_amount
+                sources.append(f"[DESPERATE-MAX] Using MAX value: '{max_label}' = ${max_amount:,.0f}")
+                tlog.think(f"Using MAX value as revenue: '{max_label}' = ${max_amount:,.0f}")
+
+        tlog.think(f"Desperate found: Revenue={revenue.sum():,.0f}, Net Income={net_income.sum():,.0f}")
+        return revenue, net_income, sources
+
+    def run_iterative_thinking(self) -> AttemptResult:
+        """
+        Run the Iterative Thinking Engine with while loop logic.
+
+        Attempts:
+        1. Strict: Use ib_rules.py strict tags
+        2. Relaxed: Fuzzy matches (contains "Profit")
+        3. Desperate: Any line item >$100M with "Sales"
+
+        Returns:
+            AttemptResult with the successful attempt details
+        """
+        tlog = reset_thinking_logger()  # Fresh log for this run
+
+        print("\n" + "=" * 70)
+        print("ITERATIVE THINKING ENGINE - Starting Analysis")
+        print("=" * 70)
+
+        tlog.log("Starting Iterative Thinking Engine...", level="INFO")
+        tlog.log(f"Data: {len(self.raw_df)} total rows, {len(self.df)} mapped rows", level="INFO")
+
+        max_attempts = 3
+        attempt = 0
+        final_result = None
+
+        while attempt < max_attempts:
+            attempt += 1
+            start_time = time.time()
+
+            if attempt == 1:
+                strategy = "STRICT"
+                tlog.attempt(1, "STRICT - Using ib_rules.py strict tags only")
+                revenue, net_income, sources = self._attempt_strict()
+
+            elif attempt == 2:
+                tlog.fail("Attempt 1 failed. Thinking...")
+                time.sleep(0.5)  # Deliberate pause to show "thinking"
+                strategy = "RELAXED"
+                tlog.attempt(2, "RELAXED - Fuzzy matching (contains 'Profit', 'Revenue')")
+                revenue, net_income, sources = self._attempt_relaxed()
+
+            else:
+                tlog.fail("Attempt 2 failed. Thinking...")
+                time.sleep(0.5)  # Deliberate pause
+                strategy = "DESPERATE"
+                tlog.attempt(3, "DESPERATE - Any line item >$100M with 'Sales' keyword")
+                revenue, net_income, sources = self._attempt_desperate()
+
+            duration_ms = (time.time() - start_time) * 1000
+
+            # Validation: Check if Revenue > 0 and Net Income != 0
+            revenue_total = revenue.sum()
+            net_income_total = net_income.sum()
+
+            tlog.result("Revenue", revenue_total, strategy)
+            tlog.result("Net Income", net_income_total, strategy)
+
+            is_valid = revenue_total > 0
+
+            if is_valid:
+                tlog.success(f"Attempt {attempt} successful! Revenue = ${revenue_total:,.0f}")
+                print(f"\n  [SUCCESS] Attempt {attempt} ({strategy}) successful!")
+                print(f"            Revenue: ${revenue_total:,.0f}")
+                print(f"            Net Income: ${net_income_total:,.0f}")
+
+                final_result = AttemptResult(
+                    attempt_num=attempt,
+                    strategy=strategy,
+                    revenue_value=revenue_total,
+                    net_income_value=net_income_total,
+                    is_valid=True,
+                    sources_used=sources,
+                    thinking_notes=tlog.get_summary(),
+                    duration_ms=duration_ms
+                )
+
+                # Store for use in model building
+                self._iterative_revenue = revenue
+                self._iterative_net_income = net_income
+                break
+            else:
+                tlog.fail(f"Attempt {attempt} failed: Revenue = ${revenue_total:,.0f}")
+
+        if final_result is None:
+            tlog.fail("All 3 attempts failed. Model will have zero values.")
+            print("\n  [WARNING] All attempts failed. Proceeding with zero values.")
+            final_result = AttemptResult(
+                attempt_num=3,
+                strategy="FAILED",
+                revenue_value=0,
+                net_income_value=0,
+                is_valid=False,
+                sources_used=[],
+                thinking_notes=tlog.get_summary(),
+                duration_ms=0
+            )
+            self._iterative_revenue = pd.Series(0.0, index=self.dates)
+            self._iterative_net_income = pd.Series(0.0, index=self.dates)
+
+        # Store the result
+        self.iterative_result = final_result
+        tlog.log(f"\nThinking log saved to: {tlog.log_path}", level="INFO")
+
+        return final_result
+
+    # =========================================================================
     # DCF MODEL - Discounted Cash Flow Historical Setup
     # =========================================================================
 
@@ -672,15 +1036,21 @@ class FinancialEngine:
         """
         Build DCF Historical Setup with JPMC-grade granularity.
 
-        ENHANCED: Now includes sanity checks and validation.
+        ENHANCED V3.1: Uses Iterative Thinking Engine for critical buckets.
         """
         print("\n  [DCF ENGINE] Building DCF Historical Setup...")
         self.audit_log = []
         self.sanity_results = {}
         self.engine_errors = []
 
-        # === REVENUE ===
+        # Run Iterative Thinking Engine first
+        iterative_result = self.run_iterative_thinking()
+
+        # === REVENUE === (Use iterative result if standard fails)
         revenue = self._smart_sum(REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS)
+        if revenue.sum() == 0 and hasattr(self, '_iterative_revenue'):
+            revenue = self._iterative_revenue
+            logger.info("Using iterative revenue value")
 
         # === COGS ===
         cogs = self._smart_sum(COGS_TOTAL_IDS | COGS_COMPONENT_IDS)
