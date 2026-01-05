@@ -384,64 +384,180 @@ def render_data_tab():
         st.dataframe(df, use_container_width=True, height=400)
 
 
+def check_model_has_data(df: pd.DataFrame) -> dict:
+    """
+    Check if a model DataFrame has actual data (non-zero values).
+    Returns dict with validation info.
+    """
+    if df is None or df.empty:
+        return {'valid': False, 'error': 'No data available'}
+
+    # Check for critical zero values
+    critical_rows = ['Total Revenue', 'Revenue', 'EBITDA', 'Net Income']
+    zero_criticals = []
+
+    for row in critical_rows:
+        if row in df.index:
+            row_values = df.loc[row]
+            if isinstance(row_values, pd.Series):
+                if row_values.sum() == 0:
+                    zero_criticals.append(row)
+
+    if zero_criticals:
+        return {
+            'valid': False,
+            'error': f"Critical values are zero: {', '.join(zero_criticals)}",
+            'zero_buckets': zero_criticals
+        }
+
+    return {'valid': True, 'error': None}
+
+
 def render_models_tab():
-    """Render the IB models output view."""
+    """Render the IB models output view with enhanced error handling."""
     st.markdown("### Investment Banking Models")
 
     if not st.session_state.current_session or not st.session_state.pipeline_result:
         st.info("Run the pipeline first to see models.")
         return
 
+    # Check if pipeline had errors
+    result = st.session_state.pipeline_result
+    if not result.get("success"):
+        st.error(f"Pipeline Error: {result.get('error', 'Unknown error')}")
+        st.warning("Models may not be available due to pipeline failure.")
+
     sm = st.session_state.session_manager
     files = sm.get_session_files(st.session_state.current_session.session_id)
 
-    model_tabs = st.tabs(["DCF Setup", "LBO Stats", "Comps Metrics", "Validation"])
+    model_tabs = st.tabs(["DCF Setup", "LBO Stats", "Comps Metrics", "Validation", "Engine Log"])
 
     with model_tabs[0]:
-        if files.get("dcf"):
-            df = pd.read_csv(files["dcf"])
-            st.dataframe(df, use_container_width=True, height=400)
-            st.download_button(
-                "Download DCF CSV",
-                df.to_csv(index=False).encode('utf-8'),
-                "DCF_Historical_Setup.csv",
-                "text/csv"
-            )
+        dcf_path = files.get("dcf")
+        # Check file existence explicitly
+        if dcf_path and os.path.exists(dcf_path):
+            try:
+                df = pd.read_csv(dcf_path, index_col=0)
+
+                # Validate the data
+                validation = check_model_has_data(df)
+                if not validation['valid']:
+                    st.error(f"DCF Model Issue: {validation['error']}")
+                    st.warning("The model contains zero values in critical buckets. This may indicate mapping issues.")
+
+                    # Show the data anyway for debugging
+                    with st.expander("View Raw DCF Data (Debug)", expanded=False):
+                        st.dataframe(df, use_container_width=True, height=300)
+                else:
+                    st.dataframe(df, use_container_width=True, height=400)
+                    st.download_button(
+                        "Download DCF CSV",
+                        df.to_csv().encode('utf-8'),
+                        "DCF_Historical_Setup.csv",
+                        "text/csv"
+                    )
+            except Exception as e:
+                st.error(f"Error reading DCF file: {str(e)}")
         else:
-            st.warning("DCF data not available")
+            st.error("DCF Data Not Available")
+            st.markdown("""
+            **Possible causes:**
+            1. Pipeline failed to complete
+            2. No valid financial data was mapped
+            3. Engine encountered critical errors
+
+            **Check the Engine Log tab for details.**
+            """)
 
     with model_tabs[1]:
-        if files.get("lbo"):
-            df = pd.read_csv(files["lbo"])
-            st.dataframe(df, use_container_width=True, height=400)
-            st.download_button(
-                "Download LBO CSV",
-                df.to_csv(index=False).encode('utf-8'),
-                "LBO_Credit_Stats.csv",
-                "text/csv"
-            )
+        lbo_path = files.get("lbo")
+        if lbo_path and os.path.exists(lbo_path):
+            try:
+                df = pd.read_csv(lbo_path, index_col=0)
+                validation = check_model_has_data(df)
+                if not validation['valid']:
+                    st.warning(f"LBO Model Issue: {validation['error']}")
+                st.dataframe(df, use_container_width=True, height=400)
+                st.download_button(
+                    "Download LBO CSV",
+                    df.to_csv().encode('utf-8'),
+                    "LBO_Credit_Stats.csv",
+                    "text/csv"
+                )
+            except Exception as e:
+                st.error(f"Error reading LBO file: {str(e)}")
         else:
-            st.warning("LBO data not available")
+            st.warning("LBO data not available - check Engine Log for errors")
 
     with model_tabs[2]:
-        if files.get("comps"):
-            df = pd.read_csv(files["comps"])
-            st.dataframe(df, use_container_width=True, height=400)
-            st.download_button(
-                "Download Comps CSV",
-                df.to_csv(index=False).encode('utf-8'),
-                "Comps_Trading_Metrics.csv",
-                "text/csv"
-            )
+        comps_path = files.get("comps")
+        if comps_path and os.path.exists(comps_path):
+            try:
+                df = pd.read_csv(comps_path, index_col=0)
+                validation = check_model_has_data(df)
+                if not validation['valid']:
+                    st.warning(f"Comps Model Issue: {validation['error']}")
+                st.dataframe(df, use_container_width=True, height=400)
+                st.download_button(
+                    "Download Comps CSV",
+                    df.to_csv().encode('utf-8'),
+                    "Comps_Trading_Metrics.csv",
+                    "text/csv"
+                )
+            except Exception as e:
+                st.error(f"Error reading Comps file: {str(e)}")
         else:
-            st.warning("Comps data not available")
+            st.warning("Comps data not available - check Engine Log for errors")
 
     with model_tabs[3]:
-        if files.get("validation"):
-            df = pd.read_csv(files["validation"])
-            st.dataframe(df, use_container_width=True, height=400)
+        validation_path = files.get("validation")
+        if validation_path and os.path.exists(validation_path):
+            df = pd.read_csv(validation_path)
+            # Highlight failures
+            def highlight_status(val):
+                if val == 'FAIL':
+                    return 'background-color: #f8d7da; color: #721c24'
+                elif val == 'WARN':
+                    return 'background-color: #fff3cd; color: #856404'
+                elif val == 'PASS':
+                    return 'background-color: #d4edda; color: #155724'
+                return ''
+
+            if 'Status' in df.columns:
+                styled_df = df.style.applymap(highlight_status, subset=['Status'])
+                st.dataframe(styled_df, use_container_width=True, height=400)
+            else:
+                st.dataframe(df, use_container_width=True, height=400)
         else:
-            st.info("No validation issues found")
+            st.info("No validation report available")
+
+    with model_tabs[4]:
+        st.markdown("### Engine Execution Log")
+
+        # Show pipeline result details
+        if result:
+            if result.get("success"):
+                st.success(f"Pipeline completed in {result.get('duration', 0):.2f}s")
+            else:
+                st.error(f"Pipeline failed: {result.get('error', 'Unknown')}")
+
+        # Show unmapped data if available
+        unmapped_path = files.get("unmapped")
+        if unmapped_path and os.path.exists(unmapped_path):
+            unmapped_df = pd.read_csv(unmapped_path)
+            if len(unmapped_df) > 0:
+                st.warning(f"{len(unmapped_df)} items could not be mapped")
+                with st.expander("View Unmapped Items"):
+                    st.dataframe(unmapped_df, use_container_width=True, height=200)
+
+        # Show hierarchy resolutions
+        hierarchy_path = files.get("hierarchy")
+        if hierarchy_path and os.path.exists(hierarchy_path):
+            hierarchy_df = pd.read_csv(hierarchy_path)
+            if len(hierarchy_df) > 0:
+                st.info(f"{len(hierarchy_df)} hierarchy conflicts resolved (prevented double-counting)")
+                with st.expander("View Hierarchy Resolutions"):
+                    st.dataframe(hierarchy_df, use_container_width=True, height=200)
 
     # Download all as ZIP
     st.divider()

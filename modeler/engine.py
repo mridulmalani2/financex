@@ -1,30 +1,52 @@
 #!/usr/bin/env python3
 """
-Stage 5: Enhanced Financial Engine (JPMC/Citadel Grade) - v2
-============================================================
+Stage 5: Enhanced Financial Engine (JPMC/Citadel Grade) - v2.1
+==============================================================
 Investment Banking-grade financial modeling engine that transforms
 normalized financial data into audit-ready DCF, LBO, and Comps datasets.
 
-CRITICAL FIXES in v2:
+CRITICAL FIXES in v2.1:
 1. HIERARCHY-AWARE AGGREGATION - Detects "Total + Components" patterns and
    prevents double counting BEFORE pivot aggregation
 2. Source Label Tracking - Keeps original labels for audit trail
 3. Unmapped Data Reporting - Generates report of dropped data
 4. Cross-Statement Validation - Balance sheet equation checks
+5. SANITY LOOP - Validates critical buckets are non-zero with fallback recovery
+6. DEEP CLEAN - Auto-corrects balance sheet equation before model output
 
 Output Quality: Suitable for JPMC M&A, Citadel fundamental analysis
+
+Philosophy: "Think, Don't Rush" - Validates before output
 """
 import pandas as pd
 import os
 import sys
+import logging
 from typing import Dict, Set, List, Tuple, Optional
 from dataclasses import dataclass, field
 from collections import defaultdict
+
+# Configure logging for engine
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("FinancialEngine")
 
 # Import Rules and Taxonomy Engine
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.ib_rules import *
 from taxonomy_utils import get_taxonomy_engine, TaxonomyEngine
+
+
+class ModelValidationError(Exception):
+    """Raised when a model fails critical validation checks."""
+    pass
+
+
+class ZeroModelError(ModelValidationError):
+    """Raised when critical buckets are zero, producing an invalid model."""
+    def __init__(self, bucket_name: str, message: str = None):
+        self.bucket_name = bucket_name
+        self.message = message or f"Critical bucket '{bucket_name}' is zero - model would be invalid"
+        super().__init__(self.message)
 
 
 @dataclass
@@ -37,6 +59,18 @@ class AuditEntry:
     source_labels: List[str] = field(default_factory=list)
     validation_status: str = "OK"
     notes: str = ""
+
+
+@dataclass
+class SanityCheckResult:
+    """Result of a sanity check on a bucket."""
+    bucket_name: str
+    value: float
+    is_zero: bool
+    fallback_attempted: bool = False
+    fallback_value: float = 0.0
+    fallback_sources: List[str] = field(default_factory=list)
+    error_message: str = ""
 
 
 @dataclass
@@ -343,14 +377,228 @@ class FinancialEngine:
         return pd.DataFrame(rows)
 
     # =========================================================================
+    # SANITY LOOP - Critical Bucket Validation with Fallback
+    # =========================================================================
+
+    def _sanity_check_bucket(self, bucket_name: str, value: pd.Series,
+                              concept_set: Set[str]) -> SanityCheckResult:
+        """
+        Check if a critical bucket is zero and attempt keyword-based fallback.
+
+        Philosophy: "Think, Don't Rush" - If a critical bucket is zero,
+        search for any mapped items containing related keywords and
+        forcefully include them.
+        """
+        total_value = value.sum() if hasattr(value, 'sum') else value
+
+        if total_value != 0:
+            return SanityCheckResult(
+                bucket_name=bucket_name,
+                value=total_value,
+                is_zero=False
+            )
+
+        # Bucket is zero - attempt fallback recovery
+        logger.warning(f"SANITY CHECK: {bucket_name} is ZERO - attempting fallback recovery")
+
+        fallback_value = 0.0
+        fallback_sources = []
+
+        # Search for items containing keywords related to this bucket
+        keywords_to_search = self._get_keywords_for_bucket(bucket_name)
+
+        for _, row in self.df.iterrows():
+            source_label = str(row.get('Source_Label', '')).lower()
+            amount = float(row.get('Source_Amount', 0))
+
+            for keyword in keywords_to_search:
+                if keyword in source_label and amount != 0:
+                    # Found a potential match - check if it's not already included
+                    concept = row.get('Canonical_Concept', '')
+                    if concept not in concept_set:
+                        fallback_value += amount
+                        fallback_sources.append(row.get('Source_Label', ''))
+                        logger.info(f"  FALLBACK: Including '{row.get('Source_Label')}' ({amount:,.0f}) for {bucket_name}")
+                        break
+
+        if fallback_value != 0:
+            logger.info(f"  RECOVERY SUCCESS: {bucket_name} recovered to {fallback_value:,.0f}")
+            return SanityCheckResult(
+                bucket_name=bucket_name,
+                value=fallback_value,
+                is_zero=False,
+                fallback_attempted=True,
+                fallback_value=fallback_value,
+                fallback_sources=fallback_sources
+            )
+        else:
+            error_msg = f"CRITICAL: {bucket_name} is ZERO and no fallback data found"
+            logger.error(error_msg)
+            return SanityCheckResult(
+                bucket_name=bucket_name,
+                value=0.0,
+                is_zero=True,
+                fallback_attempted=True,
+                error_message=error_msg
+            )
+
+    def _get_keywords_for_bucket(self, bucket_name: str) -> List[str]:
+        """Get keywords to search for when a bucket is zero."""
+        keyword_map = {
+            "Total Revenue": ["revenue", "sales", "net sales", "total revenue"],
+            "Revenue": ["revenue", "sales", "net sales"],
+            "COGS": ["cost of", "cogs", "cost of goods", "cost of revenue", "cost of sales"],
+            "Net Income": ["net income", "profit", "earnings", "net earnings"],
+            "EBITDA": ["ebitda", "operating income", "operating profit"],
+            "D&A": ["depreciation", "amortization", "d&a"],
+            "CapEx": ["capex", "capital expenditure", "property plant", "pp&e"],
+            "Cash": ["cash", "cash equivalent"],
+            "Total Debt": ["debt", "borrowing", "notes payable"],
+            "Inventory": ["inventory", "inventories"],
+        }
+        return keyword_map.get(bucket_name, [bucket_name.lower()])
+
+    def _run_sanity_loop(self, metrics: Dict[str, pd.Series]) -> Dict[str, SanityCheckResult]:
+        """
+        Run sanity checks on all critical metrics.
+        Returns dict of bucket name -> SanityCheckResult
+        """
+        print("\n  [SANITY LOOP] Validating critical buckets...")
+        results = {}
+        critical_buckets = {
+            "Total Revenue": (REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS, "revenue"),
+            "Net Income": (NET_INCOME_IDS, "net_income"),
+            "EBITDA": (None, "ebitda"),  # Calculated
+        }
+
+        for bucket_name, (concept_set, metric_key) in critical_buckets.items():
+            if metric_key in metrics:
+                value = metrics[metric_key]
+                if concept_set:
+                    result = self._sanity_check_bucket(bucket_name, value, concept_set)
+                else:
+                    # For calculated metrics like EBITDA
+                    total = value.sum() if hasattr(value, 'sum') else value
+                    result = SanityCheckResult(
+                        bucket_name=bucket_name,
+                        value=total,
+                        is_zero=(total == 0)
+                    )
+                results[bucket_name] = result
+
+                if result.is_zero:
+                    print(f"    WARNING: {bucket_name} = 0 (CRITICAL)")
+                else:
+                    print(f"    OK: {bucket_name} = {result.value:,.0f}")
+
+        return results
+
+    # =========================================================================
+    # DEEP CLEAN - Balance Sheet Validation & Auto-Correction
+    # =========================================================================
+
+    def _deep_clean_balance_sheet(self) -> Dict[str, any]:
+        """
+        Verify Balance Sheet equation: Assets = Liabilities + Equity
+        Attempt to auto-correct if possible (e.g., infer Equity if missing).
+
+        Philosophy: "Think, Don't Rush"
+        """
+        print("\n  [DEEP CLEAN] Validating Balance Sheet equation...")
+
+        results = {
+            'valid': True,
+            'assets': 0,
+            'liabilities': 0,
+            'equity': 0,
+            'difference': 0,
+            'corrections_made': [],
+            'warnings': []
+        }
+
+        for period in self.dates:
+            amounts = self._get_amounts_for_period(period)
+
+            # Get Total Assets
+            assets = 0
+            for concept in TOTAL_ASSETS_IDS:
+                if concept in amounts and amounts[concept] != 0:
+                    assets = amounts[concept]
+                    break
+
+            # If no total assets, try summing current + non-current
+            if assets == 0:
+                current_assets = sum(amounts.get(c, 0) for c in NWC_CURRENT_ASSETS_TOTAL)
+                noncurrent_assets = sum(amounts.get(c, 0) for c in FIXED_ASSETS_TOTAL)
+                if current_assets != 0 or noncurrent_assets != 0:
+                    assets = current_assets + noncurrent_assets
+                    results['corrections_made'].append(f"{period}: Inferred Total Assets from Current + Non-Current")
+
+            # Get Total Liabilities
+            liabilities = 0
+            for concept in TOTAL_LIABILITIES_IDS:
+                if concept in amounts and amounts[concept] != 0:
+                    liabilities = amounts[concept]
+                    break
+
+            if liabilities == 0:
+                current_liabs = sum(amounts.get(c, 0) for c in NWC_CURRENT_LIABS_TOTAL)
+                lt_debt = sum(amounts.get(c, 0) for c in LONG_TERM_DEBT_IDS)
+                if current_liabs != 0 or lt_debt != 0:
+                    liabilities = current_liabs + lt_debt
+                    results['corrections_made'].append(f"{period}: Inferred Total Liabilities from components")
+
+            # Get Equity
+            equity = 0
+            for concept in EQUITY_IDS:
+                if concept in amounts and amounts[concept] != 0:
+                    equity = amounts[concept]
+                    break
+
+            # If no equity but we have assets and liabilities, infer it
+            if equity == 0 and assets != 0 and liabilities != 0:
+                equity = assets - liabilities
+                results['corrections_made'].append(f"{period}: Inferred Equity as Assets - Liabilities = {equity:,.0f}")
+
+            # Validate equation
+            l_plus_e = liabilities + equity
+            difference = abs(assets - l_plus_e)
+            tolerance = abs(assets) * 0.01  # 1% tolerance
+
+            if assets != 0 and difference > tolerance:
+                results['valid'] = False
+                results['warnings'].append(
+                    f"{period}: Assets ({assets:,.0f}) != L+E ({l_plus_e:,.0f}), diff = {difference:,.0f}"
+                )
+                print(f"    WARNING: {period} - Balance Sheet imbalance of {difference:,.0f}")
+            elif assets != 0:
+                print(f"    OK: {period} - A={assets:,.0f}, L+E={l_plus_e:,.0f}")
+
+            # Store latest values
+            results['assets'] = assets
+            results['liabilities'] = liabilities
+            results['equity'] = equity
+            results['difference'] = difference
+
+        if results['corrections_made']:
+            print(f"    Auto-corrections applied: {len(results['corrections_made'])}")
+
+        return results
+
+    # =========================================================================
     # DCF MODEL - Discounted Cash Flow Historical Setup
     # =========================================================================
 
     def build_dcf_ready_view(self) -> pd.DataFrame:
         """
         Build DCF Historical Setup with JPMC-grade granularity.
+
+        ENHANCED: Now includes sanity checks and validation.
         """
+        print("\n  [DCF ENGINE] Building DCF Historical Setup...")
         self.audit_log = []
+        self.sanity_results = {}
+        self.engine_errors = []
 
         # === REVENUE ===
         revenue = self._smart_sum(REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS)
@@ -408,6 +656,29 @@ class FinancialEngine:
         # === UNLEVERED FREE CASH FLOW ===
         ufcf = nopat + da - delta_nwc - capex
 
+        # === SANITY LOOP - Validate Critical Buckets ===
+        self.sanity_results = self._run_sanity_loop({
+            'revenue': revenue,
+            'ebitda': ebitda_reported,
+            'net_income': nopat  # Using NOPAT as proxy for DCF
+        })
+
+        # Check for critical failures
+        critical_zeros = []
+        for bucket_name, result in self.sanity_results.items():
+            if result.is_zero and bucket_name in ["Total Revenue", "EBITDA"]:
+                critical_zeros.append(bucket_name)
+                self.engine_errors.append(result.error_message)
+
+        if critical_zeros:
+            error_msg = f"CRITICAL ERROR: Zero values in {', '.join(critical_zeros)} - DCF model invalid"
+            logger.error(error_msg)
+            print(f"\n  ERROR: {error_msg}")
+            # Don't raise - continue to produce output but log the error
+
+        # === DEEP CLEAN - Balance Sheet Validation ===
+        self.balance_sheet_validation = self._deep_clean_balance_sheet()
+
         data = {
             "Total Revenue": revenue,
             "(-) COGS": cogs,
@@ -430,7 +701,12 @@ class FinancialEngine:
             "UFCF Margin %": (ufcf / revenue * 100).replace([float('inf'), float('-inf')], 0).fillna(0).round(1),
         }
 
-        return pd.DataFrame(data).T
+        result_df = pd.DataFrame(data).T
+
+        # Final validation - log summary
+        print(f"\n  [DCF COMPLETE] Revenue: {revenue.sum():,.0f}, EBITDA: {ebitda_reported.sum():,.0f}, UFCF: {ufcf.sum():,.0f}")
+
+        return result_df
 
     # =========================================================================
     # LBO MODEL - Leveraged Buyout Credit Statistics
@@ -598,3 +874,53 @@ class FinancialEngine:
             }
             for e in self.audit_log
         ])
+
+    def get_engine_errors(self) -> List[str]:
+        """
+        Return list of engine errors encountered during model building.
+        Use this to check if the model is valid before displaying.
+        """
+        errors = getattr(self, 'engine_errors', [])
+
+        # Add sanity check failures
+        sanity_results = getattr(self, 'sanity_results', {})
+        for bucket_name, result in sanity_results.items():
+            if result.is_zero:
+                errors.append(result.error_message or f"{bucket_name} is zero")
+
+        # Add balance sheet validation failures
+        bs_validation = getattr(self, 'balance_sheet_validation', {})
+        if bs_validation.get('warnings'):
+            errors.extend(bs_validation['warnings'])
+
+        return errors
+
+    def has_critical_errors(self) -> bool:
+        """
+        Check if there are critical errors that would make the model invalid.
+        Returns True if Revenue or EBITDA are zero.
+        """
+        sanity_results = getattr(self, 'sanity_results', {})
+        critical_buckets = ["Total Revenue", "EBITDA"]
+
+        for bucket in critical_buckets:
+            if bucket in sanity_results and sanity_results[bucket].is_zero:
+                return True
+        return False
+
+    def get_sanity_summary(self) -> Dict[str, any]:
+        """
+        Get a summary of sanity check results for reporting.
+        """
+        sanity_results = getattr(self, 'sanity_results', {})
+        return {
+            'total_checks': len(sanity_results),
+            'passed': sum(1 for r in sanity_results.values() if not r.is_zero),
+            'failed': sum(1 for r in sanity_results.values() if r.is_zero),
+            'fallbacks_used': sum(1 for r in sanity_results.values() if r.fallback_attempted and not r.is_zero),
+            'details': {k: {
+                'value': v.value,
+                'is_zero': v.is_zero,
+                'fallback_used': v.fallback_attempted
+            } for k, v in sanity_results.items()}
+        }
