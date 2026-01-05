@@ -23,7 +23,12 @@ import zipfile
 from datetime import datetime
 
 # Local imports
-from session_manager import SessionManager, cleanup_on_startup
+from session_manager import (
+    SessionManager, cleanup_on_startup,
+    initialize_clean_slate, get_clean_slate_paths,
+    save_current_upload, write_thinking_log, append_thinking_log,
+    TEMP_SESSION_DIR, OUTPUT_DIR, LOGS_DIR, TAXONOMY_DIR
+)
 from run_pipeline import run_pipeline_programmatic
 from validator.ai_auditor import AIAuditor, AuditSeverity
 from utils.brain_manager import BrainManager, get_brain_manager
@@ -36,11 +41,16 @@ from config.base_commands import (
 )
 
 # -------------------------------------------------
-# CONFIGURATION
+# CONFIGURATION - Production V1.0 Clean Slate
 # -------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "output", "taxonomy_2025.db")
+
+# Use Clean Slate paths
+DB_PATH = os.path.join(OUTPUT_DIR, "taxonomy_2025.db")
 ALIAS_PATH = os.path.join(BASE_DIR, "config", "aliases.csv")
+
+# Initialize Clean Slate on first import (web app startup)
+_CLEAN_SLATE_INITIALIZED = False
 
 # -------------------------------------------------
 # GLASSMORPHISM CSS - High-Finance Aesthetic
@@ -285,8 +295,15 @@ st.set_page_config(
 st.markdown(GOLDMAN_CSS, unsafe_allow_html=True)
 
 # -------------------------------------------------
-# SESSION STATE INITIALIZATION
+# SESSION STATE INITIALIZATION - Clean Slate Architecture
 # -------------------------------------------------
+
+# Initialize Clean Slate on first run
+if 'clean_slate_initialized' not in st.session_state:
+    initialize_clean_slate()
+    st.session_state.clean_slate_initialized = True
+    st.session_state.clean_slate_paths = get_clean_slate_paths()
+
 if 'session_manager' not in st.session_state:
     st.session_state.session_manager = SessionManager()
     cleanup_on_startup()

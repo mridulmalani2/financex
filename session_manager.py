@@ -1,28 +1,43 @@
 #!/usr/bin/env python3
 """
-Session Manager: Temp Directory Isolation for FinanceX
-======================================================
-Implements strict directory management to keep the repo pristine.
+Session Manager: Production V1.0 - Clean Slate Directory Structure
+===================================================================
+Implements strict directory management with the following structure:
 
-Features:
-- All user uploads go to temp_sessions/ (git-ignored)
-- Automatic cleanup on session start/end
-- Session isolation with unique IDs
-- No user data ever touches the root directory
+DIRECTORY STRUCTURE (Enforced):
+├── temp_session/      Created on launch, wiped on exit. Stores current upload.
+├── taxonomy/          ReadOnly DB. XBRL taxonomy data.
+├── output/            Stores final models (DCF, LBO, Comps).
+└── logs/              Stores the "Thinking" logs from the iterative engine.
+
+Philosophy:
+- NO test files (client_upload.xlsx) - Only user uploads
+- Clean slate on every launch
+- All thinking/reasoning logged to logs/
+- Output directory contains production-ready models
 """
 
 import os
 import shutil
 import uuid
 import glob
+import atexit
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict
 from dataclasses import dataclass
 
 
-# Configuration
+# Configuration - PRODUCTION V1.0 CLEAN SLATE STRUCTURE
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Core directories (Clean Slate Architecture)
+TEMP_SESSION_DIR = os.path.join(BASE_DIR, "temp_session")      # Created on launch, wiped on exit
+TAXONOMY_DIR = os.path.join(BASE_DIR, "taxonomy")              # ReadOnly DB
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")                  # Final models
+LOGS_DIR = os.path.join(BASE_DIR, "logs")                      # Thinking logs
+
+# Legacy (for backwards compatibility during transition)
 TEMP_SESSIONS_DIR = os.path.join(BASE_DIR, "temp_sessions")
 SESSION_EXPIRY_HOURS = 24  # Auto-cleanup sessions older than this
 
@@ -37,6 +52,210 @@ class SessionInfo:
     messy_path: Optional[str] = None
     normalized_path: Optional[str] = None
     models_dir: Optional[str] = None
+
+
+# =============================================================================
+# CLEAN SLATE ARCHITECTURE - Production V1.0
+# =============================================================================
+
+def initialize_clean_slate() -> Dict[str, str]:
+    """
+    Initialize the Clean Slate directory structure.
+    Called on application launch.
+
+    Creates:
+    - temp_session/ - Wiped on launch, stores current upload
+    - taxonomy/ - ReadOnly DB (created if missing, never wiped)
+    - output/ - Stores final models (wiped on launch)
+    - logs/ - Stores thinking logs (wiped on launch)
+
+    Returns:
+        Dict with directory paths
+    """
+    print("[Clean Slate] Initializing Production V1.0 directory structure...")
+
+    # Wipe temp_session/ on launch (clean slate)
+    if os.path.exists(TEMP_SESSION_DIR):
+        shutil.rmtree(TEMP_SESSION_DIR)
+        print(f"  [WIPED] {TEMP_SESSION_DIR}")
+    os.makedirs(TEMP_SESSION_DIR, exist_ok=True)
+    os.makedirs(os.path.join(TEMP_SESSION_DIR, "uploads"), exist_ok=True)
+    print(f"  [CREATED] {TEMP_SESSION_DIR}")
+
+    # Create taxonomy/ (ReadOnly - never wipe, just ensure exists)
+    os.makedirs(TAXONOMY_DIR, exist_ok=True)
+    print(f"  [READY] {TAXONOMY_DIR} (ReadOnly)")
+
+    # Wipe and recreate output/ for fresh models
+    if os.path.exists(OUTPUT_DIR):
+        # Preserve taxonomy database if it exists
+        taxonomy_db = os.path.join(OUTPUT_DIR, "taxonomy_2025.db")
+        taxonomy_backup = None
+        if os.path.exists(taxonomy_db):
+            taxonomy_backup = os.path.join(BASE_DIR, ".taxonomy_2025.db.bak")
+            shutil.copy2(taxonomy_db, taxonomy_backup)
+
+        # Clear output directory
+        for item in os.listdir(OUTPUT_DIR):
+            item_path = os.path.join(OUTPUT_DIR, item)
+            if os.path.isfile(item_path) and item != "taxonomy_2025.db":
+                os.remove(item_path)
+            elif os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+
+        # Restore taxonomy database
+        if taxonomy_backup and os.path.exists(taxonomy_backup):
+            shutil.copy2(taxonomy_backup, taxonomy_db)
+            os.remove(taxonomy_backup)
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(os.path.join(OUTPUT_DIR, "final_ib_models"), exist_ok=True)
+    print(f"  [READY] {OUTPUT_DIR}")
+
+    # Wipe and recreate logs/
+    if os.path.exists(LOGS_DIR):
+        shutil.rmtree(LOGS_DIR)
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    print(f"  [CREATED] {LOGS_DIR}")
+
+    # Write session metadata
+    with open(os.path.join(TEMP_SESSION_DIR, ".clean_slate_meta"), 'w') as f:
+        f.write(f"initialized_at={datetime.now().isoformat()}\n")
+        f.write(f"version=1.0\n")
+
+    print("[Clean Slate] Ready for production.")
+
+    return {
+        "temp_session": TEMP_SESSION_DIR,
+        "taxonomy": TAXONOMY_DIR,
+        "output": OUTPUT_DIR,
+        "logs": LOGS_DIR
+    }
+
+
+def cleanup_on_exit():
+    """
+    Cleanup function registered with atexit.
+    Wipes temp_session/ on application exit.
+    """
+    if os.path.exists(TEMP_SESSION_DIR):
+        try:
+            shutil.rmtree(TEMP_SESSION_DIR)
+            print("[Clean Slate] Wiped temp_session/ on exit.")
+        except Exception as e:
+            print(f"[Clean Slate] Warning: Could not wipe temp_session/: {e}")
+
+
+def get_clean_slate_paths() -> Dict[str, str]:
+    """
+    Get the current Clean Slate directory paths.
+
+    Returns:
+        Dict with directory paths
+    """
+    return {
+        "temp_session": TEMP_SESSION_DIR,
+        "taxonomy": TAXONOMY_DIR,
+        "output": OUTPUT_DIR,
+        "logs": LOGS_DIR,
+        "upload": os.path.join(TEMP_SESSION_DIR, "uploads"),
+        "models": os.path.join(OUTPUT_DIR, "final_ib_models")
+    }
+
+
+def get_current_upload_path() -> Optional[str]:
+    """
+    Get the path to the current uploaded file (if any).
+
+    Returns:
+        Path to uploaded file or None
+    """
+    uploads_dir = os.path.join(TEMP_SESSION_DIR, "uploads")
+    if not os.path.exists(uploads_dir):
+        return None
+
+    xlsx_files = glob.glob(os.path.join(uploads_dir, "*.xlsx"))
+    return xlsx_files[0] if xlsx_files else None
+
+
+def save_current_upload(file_content: bytes, filename: str) -> str:
+    """
+    Save uploaded file to temp_session/uploads/.
+
+    Args:
+        file_content: Raw bytes of the uploaded file
+        filename: Original filename
+
+    Returns:
+        Path to the saved file
+    """
+    uploads_dir = os.path.join(TEMP_SESSION_DIR, "uploads")
+    os.makedirs(uploads_dir, exist_ok=True)
+
+    # Clear any existing uploads (single session model)
+    for existing in glob.glob(os.path.join(uploads_dir, "*.xlsx")):
+        os.remove(existing)
+
+    # Sanitize filename
+    safe_filename = "".join(c for c in filename if c.isalnum() or c in "._-")
+    if not safe_filename.endswith(".xlsx"):
+        safe_filename += ".xlsx"
+
+    upload_path = os.path.join(uploads_dir, safe_filename)
+
+    with open(upload_path, 'wb') as f:
+        f.write(file_content)
+
+    return upload_path
+
+
+def write_thinking_log(log_content: str, log_name: str = "thinking") -> str:
+    """
+    Write a thinking/reasoning log to logs/.
+
+    Args:
+        log_content: The log content to write
+        log_name: Base name for the log file
+
+    Returns:
+        Path to the log file
+    """
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(LOGS_DIR, f"{log_name}_{timestamp}.log")
+
+    with open(log_path, 'w', encoding='utf-8') as f:
+        f.write(f"=== FinanceX Thinking Log ===\n")
+        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+        f.write(f"{'='*50}\n\n")
+        f.write(log_content)
+
+    return log_path
+
+
+def append_thinking_log(log_line: str, log_path: str = None) -> str:
+    """
+    Append a line to the current thinking log.
+
+    Args:
+        log_line: Line to append
+        log_path: Optional specific log path
+
+    Returns:
+        Path to the log file
+    """
+    if log_path is None:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        log_path = os.path.join(LOGS_DIR, "current_thinking.log")
+
+    with open(log_path, 'a', encoding='utf-8') as f:
+        f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {log_line}\n")
+
+    return log_path
+
+
+# Register cleanup on exit
+atexit.register(cleanup_on_exit)
 
 
 class SessionManager:
