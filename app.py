@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-FinanceX: Professional Streamlit Application
-=============================================
-JPMC/Citadel-Grade Financial Workbench UI
+FinanceX: Production V1.0 - Goldman-Futuristic Interface
+==========================================================
+JPMC/Citadel-Grade Financial Workbench with:
 
-This is the main application layer implementing:
-1. Session-based file isolation (temp_sessions/)
-2. Dynamic pipeline execution
-3. AI Auditor dashboard with forensic accounting results
-4. Download functionality for all outputs
+1. ONBOARDING JOURNEY - 3-step guide for new users
+2. ANALYST BRAIN (BYOB) - Portable JSON memory upload/download
+3. ANALYST COCKPIT - Grouped audits with interactive fixes
+4. GLASSMORPHISM UI - High-Finance Aesthetic
 
-Flow: Upload -> Save to Temp -> Run Pipeline -> Display Audit -> Download
+Flow: Onboarding -> Upload Brain -> Process -> Audit -> Download
 """
 
 import streamlit as st
@@ -19,6 +18,7 @@ import sqlite3
 import os
 import csv
 import io
+import json
 import zipfile
 from datetime import datetime
 
@@ -26,6 +26,7 @@ from datetime import datetime
 from session_manager import SessionManager, cleanup_on_startup
 from run_pipeline import run_pipeline_programmatic
 from validator.ai_auditor import AIAuditor, AuditSeverity
+from utils.brain_manager import BrainManager, get_brain_manager
 
 # -------------------------------------------------
 # CONFIGURATION
@@ -34,20 +35,253 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "output", "taxonomy_2025.db")
 ALIAS_PATH = os.path.join(BASE_DIR, "config", "aliases.csv")
 
+# -------------------------------------------------
+# GLASSMORPHISM CSS - High-Finance Aesthetic
+# -------------------------------------------------
+GOLDMAN_CSS = """
+<style>
+    /* Import professional fonts */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    /* Root variables */
+    :root {
+        --primary-dark: #0a0a0f;
+        --secondary-dark: #12121a;
+        --accent-gold: #c9a962;
+        --accent-blue: #3b82f6;
+        --accent-green: #10b981;
+        --accent-red: #ef4444;
+        --accent-yellow: #f59e0b;
+        --glass-bg: rgba(18, 18, 26, 0.85);
+        --glass-border: rgba(201, 169, 98, 0.2);
+        --text-primary: #ffffff;
+        --text-secondary: #a1a1aa;
+    }
+
+    /* Global styles */
+    .stApp {
+        background: linear-gradient(135deg, var(--primary-dark) 0%, var(--secondary-dark) 100%);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    /* Glassmorphism cards */
+    .glass-card {
+        background: var(--glass-bg);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        border: 1px solid var(--glass-border);
+        border-radius: 16px;
+        padding: 24px;
+        margin: 16px 0;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .glass-card-highlight {
+        background: linear-gradient(135deg, rgba(201, 169, 98, 0.1) 0%, rgba(18, 18, 26, 0.9) 100%);
+        border: 1px solid var(--accent-gold);
+    }
+
+    /* Headers */
+    .main-header {
+        text-align: center;
+        padding: 40px 0;
+        margin-bottom: 20px;
+    }
+
+    .main-header h1 {
+        font-size: 3rem;
+        font-weight: 700;
+        background: linear-gradient(135deg, var(--accent-gold) 0%, #f0d890 50%, var(--accent-gold) 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        margin: 0;
+        letter-spacing: -0.02em;
+    }
+
+    .main-header p {
+        color: var(--text-secondary);
+        font-size: 1.1rem;
+        margin-top: 8px;
+        font-weight: 400;
+    }
+
+    /* Step indicators */
+    .step-indicator {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+
+    .step-number {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, var(--accent-gold) 0%, #d4b06a 100%);
+        color: var(--primary-dark);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 1rem;
+    }
+
+    .step-title {
+        font-size: 1.3rem;
+        font-weight: 600;
+        color: var(--text-primary);
+    }
+
+    /* Severity badges */
+    .badge-critical {
+        background: rgba(239, 68, 68, 0.2);
+        border: 1px solid var(--accent-red);
+        color: var(--accent-red);
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+
+    .badge-warning {
+        background: rgba(245, 158, 11, 0.2);
+        border: 1px solid var(--accent-yellow);
+        color: var(--accent-yellow);
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+
+    .badge-pass {
+        background: rgba(16, 185, 129, 0.2);
+        border: 1px solid var(--accent-green);
+        color: var(--accent-green);
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+
+    /* Code blocks */
+    .ocr-prompt {
+        background: rgba(0, 0, 0, 0.4);
+        border: 1px solid var(--glass-border);
+        border-radius: 12px;
+        padding: 20px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.9rem;
+        color: var(--text-secondary);
+        white-space: pre-wrap;
+        line-height: 1.6;
+    }
+
+    /* Buttons */
+    .stButton > button {
+        background: linear-gradient(135deg, var(--accent-gold) 0%, #d4b06a 100%);
+        color: var(--primary-dark);
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        padding: 12px 24px;
+        transition: all 0.3s ease;
+    }
+
+    .stButton > button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 24px rgba(201, 169, 98, 0.3);
+    }
+
+    /* Force Generate Button */
+    .force-btn {
+        background: linear-gradient(135deg, var(--accent-red) 0%, #dc2626 100%) !important;
+        color: white !important;
+    }
+
+    /* Metrics */
+    .metric-card {
+        background: var(--glass-bg);
+        border: 1px solid var(--glass-border);
+        border-radius: 12px;
+        padding: 16px;
+        text-align: center;
+    }
+
+    .metric-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: var(--accent-gold);
+    }
+
+    .metric-label {
+        font-size: 0.9rem;
+        color: var(--text-secondary);
+        margin-top: 4px;
+    }
+
+    /* Sidebar styling */
+    .css-1d391kg, .css-1lcbmhc {
+        background: var(--secondary-dark);
+    }
+
+    /* Hide streamlit elements */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
+    /* Expander styling */
+    .streamlit-expanderHeader {
+        background: var(--glass-bg);
+        border-radius: 8px;
+    }
+
+    /* Table styling */
+    .dataframe {
+        background: var(--glass-bg) !important;
+    }
+
+    /* Link styling */
+    a {
+        color: var(--accent-gold);
+        text-decoration: none;
+    }
+
+    a:hover {
+        text-decoration: underline;
+    }
+</style>
+"""
+
+# OCR Prompt for users
+OCR_PROMPT = """I have a PDF of financial statements. Please extract the data into 3 separate CSV blocks:
+
+1. Income Statement
+2. Balance Sheet
+3. Cash Flow Statement
+
+Formatting Rules:
+- Column A must contain the Line Item Labels.
+- Row 1 must contain the Dates (e.g., '2023', 'FY24').
+- Do not merge cells. Ensure numbers are clean (no currency symbols).
+- If a statement spans multiple pages, merge them into one CSV block."""
+
 # Page config
 st.set_page_config(
-    page_title="FinanceX Workbench",
+    page_title="FinanceX - Production V1.0",
     page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Inject CSS
+st.markdown(GOLDMAN_CSS, unsafe_allow_html=True)
 
 # -------------------------------------------------
 # SESSION STATE INITIALIZATION
 # -------------------------------------------------
 if 'session_manager' not in st.session_state:
     st.session_state.session_manager = SessionManager()
-    # Cleanup old sessions on app startup
     cleanup_on_startup()
 
 if 'current_session' not in st.session_state:
@@ -58,6 +292,18 @@ if 'pipeline_result' not in st.session_state:
 
 if 'audit_report' not in st.session_state:
     st.session_state.audit_report = None
+
+if 'brain_manager' not in st.session_state:
+    st.session_state.brain_manager = BrainManager(ALIAS_PATH)
+
+if 'manual_overrides' not in st.session_state:
+    st.session_state.manual_overrides = {}
+
+if 'onboarding_complete' not in st.session_state:
+    st.session_state.onboarding_complete = False
+
+if 'current_step' not in st.session_state:
+    st.session_state.current_step = 1
 
 
 # -------------------------------------------------
@@ -101,21 +347,11 @@ def save_new_alias(source_label: str, target_element_id: str, source_taxonomy: s
 def get_severity_color(severity: AuditSeverity) -> str:
     """Get color for audit severity."""
     return {
-        AuditSeverity.CRITICAL: "#dc3545",  # Red
-        AuditSeverity.WARNING: "#ffc107",   # Yellow
-        AuditSeverity.PASS: "#28a745",      # Green
-        AuditSeverity.INFO: "#17a2b8",      # Blue
-    }.get(severity, "#6c757d")
-
-
-def get_severity_icon(severity: AuditSeverity) -> str:
-    """Get icon for audit severity."""
-    return {
-        AuditSeverity.CRITICAL: "X",
-        AuditSeverity.WARNING: "!",
-        AuditSeverity.PASS: "+",
-        AuditSeverity.INFO: "i",
-    }.get(severity, "?")
+        AuditSeverity.CRITICAL: "#ef4444",
+        AuditSeverity.WARNING: "#f59e0b",
+        AuditSeverity.PASS: "#10b981",
+        AuditSeverity.INFO: "#3b82f6",
+    }.get(severity, "#a1a1aa")
 
 
 def create_download_zip(session_id: str) -> bytes:
@@ -135,309 +371,380 @@ def create_download_zip(session_id: str) -> bytes:
 
 
 # -------------------------------------------------
-# MAIN UI
+# MAIN HEADER
 # -------------------------------------------------
 def render_header():
-    """Render the application header."""
+    """Render the Goldman-style header."""
     st.markdown("""
-    <div style="text-align: center; padding: 1rem 0;">
-        <h1 style="margin: 0;">FinanceX Workbench</h1>
-        <p style="color: #666; margin: 0;">JPMC / Citadel Grade Financial Analysis</p>
+    <div class="main-header">
+        <h1>FinanceX</h1>
+        <p>Investment Banking-Grade Financial Analysis | Production V1.0</p>
     </div>
     """, unsafe_allow_html=True)
 
 
+# -------------------------------------------------
+# SIDEBAR - Analyst Brain & Session Info
+# -------------------------------------------------
 def render_sidebar():
-    """Render the sidebar with session info and stats."""
+    """Render sidebar with Brain upload and session info."""
     with st.sidebar:
-        st.header("Session Info")
+        st.markdown("## Analyst Brain")
+        st.markdown("*Your portable mapping memory*")
 
+        # Brain Upload
+        brain_file = st.file_uploader(
+            "Upload Brain (JSON)",
+            type=["json"],
+            help="Upload your analyst_brain.json to restore your mapping history"
+        )
+
+        if brain_file:
+            try:
+                brain_data = brain_file.read().decode('utf-8')
+                if st.session_state.brain_manager.load_from_json_string(brain_data):
+                    st.success(f"Brain loaded! {len(st.session_state.brain_manager.mappings)} custom mappings")
+                else:
+                    st.error("Failed to parse brain file")
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+
+        # Brain Stats
+        if st.session_state.brain_manager.mappings:
+            stats = st.session_state.brain_manager.get_session_stats()
+            st.metric("Custom Mappings", stats['total_user_mappings'])
+
+        # Brain Download
+        if st.button("Download Updated Brain", use_container_width=True):
+            brain_json = st.session_state.brain_manager.to_json_string()
+            st.download_button(
+                label="Save analyst_brain.json",
+                data=brain_json,
+                file_name="analyst_brain.json",
+                mime="application/json"
+            )
+
+        st.divider()
+
+        # Session Info
+        st.markdown("## Session")
         session = st.session_state.current_session
         if session:
-            st.success(f"Active: {session.session_id[:20]}...")
+            st.success(f"Active: {session.session_id[:16]}...")
 
-            # Show pipeline status
             if st.session_state.pipeline_result:
                 result = st.session_state.pipeline_result
                 if result["success"]:
-                    st.metric("Pipeline Status", "Complete")
+                    st.metric("Status", "Complete")
                     st.metric("Duration", f"{result['duration']:.1f}s")
                 else:
-                    st.error(f"Failed: {result['error'][:50]}...")
+                    st.error(f"Failed")
 
-            # Cleanup button
-            if st.button("Clear Session", type="secondary"):
+            if st.button("Clear Session", type="secondary", use_container_width=True):
                 sm = st.session_state.session_manager
                 sm.cleanup_session(session.session_id)
                 st.session_state.current_session = None
                 st.session_state.pipeline_result = None
                 st.session_state.audit_report = None
+                st.session_state.onboarding_complete = False
                 st.rerun()
         else:
             st.info("No active session")
 
-        st.divider()
-
         # Audit Summary
         if st.session_state.audit_report:
+            st.divider()
+            st.markdown("## Audit Summary")
             report = st.session_state.audit_report
-            st.header("Audit Summary")
 
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("Critical", report.critical_count,
-                          delta_color="inverse" if report.critical_count > 0 else "off")
+                st.markdown(f"<div style='text-align:center;color:#ef4444;font-size:1.5rem;font-weight:bold;'>{report.critical_count}</div><div style='text-align:center;color:#a1a1aa;font-size:0.8rem;'>Critical</div>", unsafe_allow_html=True)
             with col2:
-                st.metric("Warnings", report.warning_count,
-                          delta_color="inverse" if report.warning_count > 0 else "off")
+                st.markdown(f"<div style='text-align:center;color:#f59e0b;font-size:1.5rem;font-weight:bold;'>{report.warning_count}</div><div style='text-align:center;color:#a1a1aa;font-size:0.8rem;'>Warnings</div>", unsafe_allow_html=True)
             with col3:
-                st.metric("Passed", report.pass_count)
-
-            # Overall status indicator
-            if report.overall_status == "PASSED":
-                st.success("All Checks Passed")
-            elif report.overall_status == "REVIEW_NEEDED":
-                st.warning("Review Recommended")
-            else:
-                st.error("Critical Issues Found")
+                st.markdown(f"<div style='text-align:center;color:#10b981;font-size:1.5rem;font-weight:bold;'>{report.pass_count}</div><div style='text-align:center;color:#a1a1aa;font-size:0.8rem;'>Passed</div>", unsafe_allow_html=True)
 
         st.divider()
-        st.caption("FinanceX v2.0")
-        st.caption("100% Local - Zero Cloud Dependencies")
+        st.caption("FinanceX Production V1.0")
+        st.caption("100% Local | Zero Cloud | BYOB Architecture")
 
 
-def render_upload_tab():
-    """Render the file upload tab."""
-    st.markdown("### Step 1: Upload Financial Statements")
-    st.markdown("Upload an Excel file (.xlsx) containing Income Statement, Balance Sheet, and Cash Flow Statement.")
+# -------------------------------------------------
+# ONBOARDING JOURNEY - 3-Step Guide
+# -------------------------------------------------
+def render_onboarding():
+    """Render the onboarding journey for new users."""
+    st.markdown("""
+    <div class="glass-card glass-card-highlight" style="text-align: center; padding: 40px;">
+        <h2 style="color: #c9a962; margin-bottom: 8px;">Welcome to FinanceX</h2>
+        <p style="color: #a1a1aa; font-size: 1.1rem;">Follow these 3 steps to analyze your financial statements</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    uploaded_file = st.file_uploader(
-        "Choose Excel file",
-        type=["xlsx", "xls"],
-        help="Supported formats: .xlsx, .xls"
-    )
+    # Step 1: OCR
+    st.markdown("""
+    <div class="glass-card">
+        <div class="step-indicator">
+            <div class="step-number">1</div>
+            <div class="step-title">Prepare Your Data (OCR)</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    if uploaded_file:
-        st.success(f"File selected: {uploaded_file.name}")
+    st.markdown("""
+    We do not parse PDFs directly. Use AI to convert your financial statements to structured data.
 
-        # Show file preview info
-        st.info(f"Size: {uploaded_file.size / 1024:.1f} KB")
+    **Free OCR Tool:** [ChatGPT Financial Statement OCR](https://chatgpt.com/g/g-wETMBcESv-ocr)
 
-        col1, col2 = st.columns(2)
+    Copy this prompt and paste it along with your PDF:
+    """)
 
-        with col1:
-            if st.button("Process File", type="primary", use_container_width=True):
-                with st.spinner("Processing..."):
-                    # Create session
-                    sm = st.session_state.session_manager
-                    session = sm.create_session()
-                    st.session_state.current_session = session
+    st.code(OCR_PROMPT, language="text")
 
-                    # Save upload
-                    upload_path = sm.save_upload(
-                        session.session_id,
-                        uploaded_file.getvalue(),
-                        uploaded_file.name
-                    )
-
-                    # Run pipeline
-                    output_dir = sm.get_output_dir(session.session_id)
-                    result = run_pipeline_programmatic(upload_path, output_dir, quiet=True)
-                    st.session_state.pipeline_result = result
-
-                    if result["success"]:
-                        # Run AI Auditor
-                        files = sm.get_session_files(session.session_id)
-                        auditor = AIAuditor(
-                            normalized_df=pd.read_csv(files["normalized"]) if files.get("normalized") else None,
-                            dcf_df=pd.read_csv(files["dcf"]) if files.get("dcf") else None,
-                            lbo_df=pd.read_csv(files["lbo"]) if files.get("lbo") else None,
-                            comps_df=pd.read_csv(files["comps"]) if files.get("comps") else None
-                        )
-                        st.session_state.audit_report = auditor.run_full_audit()
-
-                        st.success("Pipeline completed successfully!")
-                        st.rerun()
-                    else:
-                        st.error(f"Pipeline failed: {result['error']}")
-
-        with col2:
-            if st.button("Clear", use_container_width=True):
-                st.session_state.current_session = None
-                st.session_state.pipeline_result = None
-                st.session_state.audit_report = None
-                st.session_state.manual_overrides = {}
-                st.rerun()
-
-
-def render_audit_tab():
-    """
-    Render the AI Auditor dashboard with Human-in-the-Loop capabilities.
-
-    Features:
-    1. Categorized accordion view (Passed/Critical/Warnings)
-    2. Manual Override mechanism for forcing bucket values
-    3. Brute Force button to generate templates despite errors
-    """
-    st.markdown("### AI Auditor - Human-in-the-Loop Dashboard")
-
-    if not st.session_state.audit_report:
-        st.info("Run the pipeline first to see audit results.")
-        return
-
-    # Initialize manual overrides in session state
-    if 'manual_overrides' not in st.session_state:
-        st.session_state.manual_overrides = {}
-
-    report = st.session_state.audit_report
-
-    # Overall Status Banner with metrics
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2 = st.columns(2)
     with col1:
-        st.metric("Passed", report.pass_count, delta_color="off")
-    with col2:
-        st.metric("Warnings", report.warning_count,
-                  delta_color="inverse" if report.warning_count > 0 else "off")
-    with col3:
-        st.metric("Critical", report.critical_count,
-                  delta_color="inverse" if report.critical_count > 0 else "off")
-    with col4:
-        if report.overall_status == "PASSED":
-            st.success("PASSED")
-        elif report.overall_status == "REVIEW_NEEDED":
-            st.warning("REVIEW")
-        else:
-            st.error("FAILED")
+        if st.button("Copy Prompt to Clipboard", use_container_width=True):
+            st.toast("Prompt copied! Paste it in ChatGPT with your PDF.")
 
     st.divider()
 
-    # Categorize findings by severity
-    passed_findings = []
-    warning_findings = []
-    critical_findings = []
+    # Step 2: Google Sheets Setup
+    st.markdown("""
+    <div class="glass-card">
+        <div class="step-indicator">
+            <div class="step-number">2</div>
+            <div class="step-title">Create Your Excel File</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    for finding in report.findings:
-        if finding.severity == AuditSeverity.PASS:
-            passed_findings.append(finding)
-        elif finding.severity == AuditSeverity.WARNING:
-            warning_findings.append(finding)
-        elif finding.severity == AuditSeverity.CRITICAL:
-            critical_findings.append(finding)
+    st.markdown("""
+    After getting the CSVs from the OCR tool:
 
-    # ==========================================================================
-    # Section 2: CRITICAL FAILURES (Expanded, Prominent)
-    # ==========================================================================
+    1. Go to **[sheets.new](https://sheets.new)** to create a new Google Sheet
+    2. Create 3 tabs named **exactly**:
+       - `Income Statement`
+       - `Balance Sheet`
+       - `Cashflow Statement`
+    3. Paste each CSV into the corresponding tab
+    4. Download as **.xlsx** (File > Download > Microsoft Excel)
+    """)
+
+    st.info("Tab names must match exactly for the parser to work correctly.")
+
+    st.divider()
+
+    # Step 3: Upload
+    st.markdown("""
+    <div class="glass-card">
+        <div class="step-indicator">
+            <div class="step-number">3</div>
+            <div class="step-title">Upload & Analyze</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Upload Your Financial Data**")
+        uploaded_file = st.file_uploader(
+            "Excel file (.xlsx)",
+            type=["xlsx", "xls"],
+            help="Your prepared financial statements"
+        )
+
+    with col2:
+        st.markdown("**Upload Analyst Brain (Optional)**")
+        brain_file = st.file_uploader(
+            "Brain file (.json)",
+            type=["json"],
+            help="Your saved mapping history"
+        )
+
+        if brain_file:
+            try:
+                brain_data = brain_file.read().decode('utf-8')
+                if st.session_state.brain_manager.load_from_json_string(brain_data):
+                    st.success(f"Brain loaded!")
+            except Exception as e:
+                st.error(f"Error loading brain: {str(e)}")
+
+    if uploaded_file:
+        st.success(f"File ready: {uploaded_file.name} ({uploaded_file.size / 1024:.1f} KB)")
+
+        if st.button("Process Financial Statements", type="primary", use_container_width=True):
+            with st.spinner("Processing your data..."):
+                # Create session
+                sm = st.session_state.session_manager
+                session = sm.create_session()
+                st.session_state.current_session = session
+
+                # Save upload
+                upload_path = sm.save_upload(
+                    session.session_id,
+                    uploaded_file.getvalue(),
+                    uploaded_file.name
+                )
+
+                # Run pipeline
+                output_dir = sm.get_output_dir(session.session_id)
+                result = run_pipeline_programmatic(upload_path, output_dir, quiet=True)
+                st.session_state.pipeline_result = result
+
+                if result["success"]:
+                    # Run AI Auditor
+                    files = sm.get_session_files(session.session_id)
+                    auditor = AIAuditor(
+                        normalized_df=pd.read_csv(files["normalized"]) if files.get("normalized") else None,
+                        dcf_df=pd.read_csv(files["dcf"]) if files.get("dcf") else None,
+                        lbo_df=pd.read_csv(files["lbo"]) if files.get("lbo") else None,
+                        comps_df=pd.read_csv(files["comps"]) if files.get("comps") else None
+                    )
+                    st.session_state.audit_report = auditor.run_full_audit()
+                    st.session_state.onboarding_complete = True
+                    st.success("Analysis complete!")
+                    st.rerun()
+                else:
+                    st.error(f"Pipeline failed: {result['error']}")
+
+
+# -------------------------------------------------
+# ANALYST COCKPIT - Results Dashboard
+# -------------------------------------------------
+def render_analyst_cockpit():
+    """Render the main analysis cockpit with grouped audits."""
+
+    # Top metrics bar
+    if st.session_state.audit_report:
+        report = st.session_state.audit_report
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value" style="color: #10b981;">{report.pass_count}</div>
+                <div class="metric-label">Passed</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value" style="color: #f59e0b;">{report.warning_count}</div>
+                <div class="metric-label">Warnings</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col3:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value" style="color: #ef4444;">{report.critical_count}</div>
+                <div class="metric-label">Critical</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col4:
+            status_color = "#10b981" if report.overall_status == "PASSED" else "#f59e0b" if report.overall_status == "REVIEW_NEEDED" else "#ef4444"
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value" style="color: {status_color};">{report.overall_status}</div>
+                <div class="metric-label">Overall</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.divider()
+
+    # Tabs for different views
+    tabs = st.tabs(["Audit Results", "Financial Models", "Data View", "Fix Unmapped", "Downloads"])
+
+    # Tab 1: Audit Results
+    with tabs[0]:
+        render_audit_results()
+
+    # Tab 2: Financial Models
+    with tabs[1]:
+        render_financial_models()
+
+    # Tab 3: Data View
+    with tabs[2]:
+        render_data_view()
+
+    # Tab 4: Fix Unmapped
+    with tabs[3]:
+        render_fix_unmapped()
+
+    # Tab 5: Downloads
+    with tabs[4]:
+        render_downloads()
+
+
+def render_audit_results():
+    """Render audit results with grouped findings."""
+    if not st.session_state.audit_report:
+        st.info("No audit results available. Process your data first.")
+        return
+
+    report = st.session_state.audit_report
+
+    # Categorize findings
+    critical_findings = [f for f in report.findings if f.severity == AuditSeverity.CRITICAL]
+    warning_findings = [f for f in report.findings if f.severity == AuditSeverity.WARNING]
+    passed_findings = [f for f in report.findings if f.severity == AuditSeverity.PASS]
+
+    # CRITICAL FAILURES (Expanded)
     if critical_findings:
-        with st.expander(f"**CRITICAL FAILURES** ({len(critical_findings)} issues)", expanded=True):
-            st.error("These issues may cause invalid model output. Manual intervention recommended.")
+        with st.expander(f"CRITICAL FAILURES ({len(critical_findings)})", expanded=True):
+            st.error("These issues require immediate attention.")
 
             for i, finding in enumerate(critical_findings):
-                st.markdown("---")
-                st.markdown(f"**{finding.check_name}**")
-                st.markdown(f"> {finding.message}")
+                st.markdown(f"""
+                <div class="glass-card" style="border-left: 4px solid #ef4444; margin: 8px 0;">
+                    <strong style="color: #ef4444;">{finding.check_name}</strong>
+                    <p style="color: #a1a1aa; margin: 8px 0;">{finding.message}</p>
+                </div>
+                """, unsafe_allow_html=True)
 
-                # Show details
-                if finding.details:
-                    with st.popover("View Details"):
-                        st.json(finding.details)
-
-                # Interactive "Fix It" - Manual Override
-                override_key = f"critical_{i}_{finding.check_name}"
-                bucket_name = _extract_bucket_name(finding)
-
-                if bucket_name:
-                    st.markdown(f"**Affected Bucket:** `{bucket_name}`")
-
-                    col_a, col_b = st.columns([3, 1])
-                    with col_a:
-                        override_value = st.number_input(
-                            f"Force value for {bucket_name}",
-                            value=st.session_state.manual_overrides.get(bucket_name, 0.0),
-                            key=f"override_{override_key}",
-                            help="Enter a value to override this bucket in the output"
-                        )
-                    with col_b:
-                        if st.button("Apply Override", key=f"apply_{override_key}"):
-                            st.session_state.manual_overrides[bucket_name] = override_value
-                            st.success(f"Override set: {bucket_name} = {override_value:,.2f}")
-                            st.rerun()
-
-                if finding.recommendation:
-                    st.caption(f"Recommendation: {finding.recommendation}")
-
-    # ==========================================================================
-    # Section 3: WARNINGS (Expanded, Prominent)
-    # ==========================================================================
-    if warning_findings:
-        with st.expander(f"**WARNINGS** ({len(warning_findings)} items)", expanded=True):
-            st.warning("These items should be reviewed but may not block model generation.")
-
-            for i, finding in enumerate(warning_findings):
-                st.markdown("---")
-                st.markdown(f"**{finding.check_name}**")
-                st.markdown(f"> {finding.message}")
-
-                if finding.details:
-                    with st.popover("View Details"):
-                        st.json(finding.details)
-
-                # Interactive "Fix It" for warnings
+                # Interactive fix
                 bucket_name = _extract_bucket_name(finding)
                 if bucket_name:
-                    override_key = f"warning_{i}_{finding.check_name}"
-
-                    col_a, col_b = st.columns([3, 1])
-                    with col_a:
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
                         override_value = st.number_input(
                             f"Override {bucket_name}",
                             value=st.session_state.manual_overrides.get(bucket_name, 0.0),
-                            key=f"override_{override_key}",
-                            help="Enter a value to override this bucket"
+                            key=f"critical_{i}_{finding.check_name}"
                         )
-                    with col_b:
-                        if st.button("Apply", key=f"apply_{override_key}"):
+                    with col2:
+                        if st.button("Apply", key=f"apply_critical_{i}"):
                             st.session_state.manual_overrides[bucket_name] = override_value
-                            st.success(f"Override: {bucket_name} = {override_value:,.2f}")
+                            # Learn this correction
+                            st.session_state.brain_manager.learn_from_correction(
+                                finding.check_name, str(override_value)
+                            )
+                            st.success(f"Override applied and learned!")
                             st.rerun()
 
-                if finding.recommendation:
-                    st.caption(f"Recommendation: {finding.recommendation}")
+    # WARNINGS (Expanded)
+    if warning_findings:
+        with st.expander(f"WARNINGS ({len(warning_findings)})", expanded=True):
+            st.warning("Review these items for accuracy.")
 
-    # ==========================================================================
-    # Section 1: PASSED CHECKS (Collapsed)
-    # ==========================================================================
+            for i, finding in enumerate(warning_findings):
+                st.markdown(f"""
+                <div class="glass-card" style="border-left: 4px solid #f59e0b; margin: 8px 0;">
+                    <strong style="color: #f59e0b;">{finding.check_name}</strong>
+                    <p style="color: #a1a1aa; margin: 8px 0;">{finding.message}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # PASSED (Collapsed)
     if passed_findings:
-        with st.expander(f"**PASSED CHECKS** ({len(passed_findings)} validated)", expanded=False):
+        with st.expander(f"PASSED CHECKS ({len(passed_findings)})", expanded=False):
             for finding in passed_findings:
                 st.markdown(f"+ **{finding.check_name}**: {finding.message}")
 
     st.divider()
 
-    # ==========================================================================
-    # Manual Overrides Summary
-    # ==========================================================================
-    if st.session_state.manual_overrides:
-        st.markdown("### Active Overrides")
-        override_df = pd.DataFrame([
-            {"Bucket": k, "Forced Value": f"{v:,.2f}"}
-            for k, v in st.session_state.manual_overrides.items()
-        ])
-        st.dataframe(override_df, use_container_width=True, hide_index=True)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Clear All Overrides", type="secondary"):
-                st.session_state.manual_overrides = {}
-                st.rerun()
-        with col2:
-            if st.button("Apply Overrides & Regenerate", type="primary"):
-                _regenerate_with_overrides()
-
-    st.divider()
-
-    # ==========================================================================
-    # BRUTE FORCE BUTTON
-    # ==========================================================================
+    # Emergency Actions
     st.markdown("### Emergency Actions")
 
     col1, col2 = st.columns(2)
@@ -446,12 +753,11 @@ def render_audit_tab():
         st.markdown("""
         **Force Generate Template**
 
-        Use this if the tool is blocked by critical errors.
+        Generate outputs even with critical errors.
         Missing values will be set to 0.0 and flagged.
         """)
 
-        if st.button("Force Generate Template (Ignore Warnings)", type="secondary",
-                     help="Generate output files even with critical errors - use with caution"):
+        if st.button("Force Generate Template", type="secondary"):
             _force_generate_template()
 
     with col2:
@@ -467,169 +773,72 @@ def render_audit_tab():
         )
 
 
-def _extract_bucket_name(finding) -> str:
-    """Extract the bucket name from an audit finding for override purposes."""
-    # Check the finding message and details for bucket names
-    message = finding.message.lower() if finding.message else ""
-    check_name = finding.check_name.lower() if finding.check_name else ""
-
-    # Map common patterns to bucket names
-    bucket_patterns = {
-        "revenue": "Total Revenue",
-        "net income": "Net Income",
-        "ebitda": "EBITDA",
-        "cogs": "COGS",
-        "gross profit": "Gross Profit",
-        "operating": "Operating Income",
-        "capex": "CapEx",
-        "cash": "Cash",
-        "debt": "Total Debt",
-        "assets": "Total Assets",
-        "liabilities": "Total Liabilities",
-        "equity": "Equity",
-        "inventory": "Inventory",
-        "receivable": "Accounts Receivable",
-        "d&a": "D&A",
-        "depreciation": "D&A",
-        "amortization": "D&A",
-    }
-
-    for pattern, bucket in bucket_patterns.items():
-        if pattern in message or pattern in check_name:
-            return bucket
-
-    # Try to extract from details
-    if finding.details:
-        details_str = str(finding.details).lower()
-        for pattern, bucket in bucket_patterns.items():
-            if pattern in details_str:
-                return bucket
-
-    return None
-
-
-def _regenerate_with_overrides():
-    """Regenerate the models with manual overrides applied."""
+def render_financial_models():
+    """Render financial model outputs."""
     if not st.session_state.current_session:
-        st.error("No active session")
+        st.info("No models available. Process your data first.")
         return
 
     sm = st.session_state.session_manager
-    session_id = st.session_state.current_session.session_id
-    files = sm.get_session_files(session_id)
+    files = sm.get_session_files(st.session_state.current_session.session_id)
 
-    if not files.get("dcf"):
-        st.error("No DCF file to modify")
-        return
+    model_tabs = st.tabs(["DCF Setup", "LBO Stats", "Comps Metrics", "Validation"])
 
-    try:
-        # Load existing DCF
-        dcf_df = pd.read_csv(files["dcf"], index_col=0)
-
-        # Apply overrides
-        for bucket_name, value in st.session_state.manual_overrides.items():
-            if bucket_name in dcf_df.index:
-                # Apply override to all columns
-                for col in dcf_df.columns:
-                    dcf_df.loc[bucket_name, col] = value
-                st.info(f"Applied override: {bucket_name} = {value:,.2f}")
-
-        # Save modified DCF
-        dcf_df.to_csv(files["dcf"])
-        st.success("Models regenerated with overrides applied!")
-
-        # Re-run audit
-        auditor = AIAuditor(
-            normalized_df=pd.read_csv(files["normalized"]) if files.get("normalized") else None,
-            dcf_df=dcf_df,
-            lbo_df=pd.read_csv(files["lbo"]) if files.get("lbo") else None,
-            comps_df=pd.read_csv(files["comps"]) if files.get("comps") else None
-        )
-        st.session_state.audit_report = auditor.run_full_audit()
-        st.rerun()
-
-    except Exception as e:
-        st.error(f"Error applying overrides: {str(e)}")
-
-
-def _force_generate_template():
-    """
-    Force generate template files even with critical errors.
-    Sets blocking values to 0.0 and outputs files anyway.
-    """
-    if not st.session_state.current_session:
-        st.error("No active session")
-        return
-
-    sm = st.session_state.session_manager
-    session_id = st.session_state.current_session.session_id
-    files = sm.get_session_files(session_id)
-
-    try:
-        with st.spinner("Force generating templates..."):
-            # Load or create DCF template
-            if files.get("dcf") and os.path.exists(files["dcf"]):
-                dcf_df = pd.read_csv(files["dcf"], index_col=0)
-            else:
-                # Create minimal template structure
-                periods = ["2024", "2023", "2022"]
-                dcf_template = {
-                    "Total Revenue": [0.0, 0.0, 0.0],
-                    "(-) COGS": [0.0, 0.0, 0.0],
-                    "(=) Gross Profit": [0.0, 0.0, 0.0],
-                    "(-) SG&A": [0.0, 0.0, 0.0],
-                    "(-) R&D": [0.0, 0.0, 0.0],
-                    "(=) EBITDA": [0.0, 0.0, 0.0],
-                    "(-) D&A": [0.0, 0.0, 0.0],
-                    "(=) EBIT": [0.0, 0.0, 0.0],
-                    "(-) Cash Taxes": [0.0, 0.0, 0.0],
-                    "(=) NOPAT": [0.0, 0.0, 0.0],
-                    "(-) CapEx": [0.0, 0.0, 0.0],
-                    "(=) Unlevered Free Cash Flow": [0.0, 0.0, 0.0],
-                }
-                dcf_df = pd.DataFrame(dcf_template, index=periods).T
-
-            # Apply any manual overrides
-            for bucket_name, value in st.session_state.manual_overrides.items():
-                if bucket_name in dcf_df.index:
-                    for col in dcf_df.columns:
-                        dcf_df.loc[bucket_name, col] = value
-
-            # Add FORCED_GENERATION flag
-            dcf_df["_FORCED_GENERATION"] = "YES - Review Required"
-
-            # Save the forced template
-            output_dir = sm.get_output_dir(session_id)
-            forced_path = os.path.join(output_dir, "DCF_Historical_Setup_FORCED.csv")
-            dcf_df.to_csv(forced_path)
-
-            # Also update the main DCF file
-            if files.get("dcf"):
-                dcf_df.to_csv(files["dcf"])
-
-            st.success("Forced template generated successfully!")
-            st.warning("**Note:** This template contains placeholder values. Manual review is required.")
-
-            # Provide download
-            csv_data = dcf_df.to_csv().encode('utf-8')
+    with model_tabs[0]:
+        dcf_path = files.get("dcf")
+        if dcf_path and os.path.exists(dcf_path):
+            df = pd.read_csv(dcf_path, index_col=0)
+            st.dataframe(df, use_container_width=True, height=400)
             st.download_button(
-                label="Download Forced DCF Template",
-                data=csv_data,
-                file_name="DCF_Historical_Setup_FORCED.csv",
-                mime="text/csv",
-                type="primary"
+                "Download DCF CSV",
+                df.to_csv().encode('utf-8'),
+                "DCF_Historical_Setup.csv",
+                "text/csv"
             )
+        else:
+            st.warning("DCF model not available")
 
-    except Exception as e:
-        st.error(f"Force generation failed: {str(e)}")
+    with model_tabs[1]:
+        lbo_path = files.get("lbo")
+        if lbo_path and os.path.exists(lbo_path):
+            df = pd.read_csv(lbo_path, index_col=0)
+            st.dataframe(df, use_container_width=True, height=400)
+            st.download_button(
+                "Download LBO CSV",
+                df.to_csv().encode('utf-8'),
+                "LBO_Credit_Stats.csv",
+                "text/csv"
+            )
+        else:
+            st.warning("LBO model not available")
+
+    with model_tabs[2]:
+        comps_path = files.get("comps")
+        if comps_path and os.path.exists(comps_path):
+            df = pd.read_csv(comps_path, index_col=0)
+            st.dataframe(df, use_container_width=True, height=400)
+            st.download_button(
+                "Download Comps CSV",
+                df.to_csv().encode('utf-8'),
+                "Comps_Trading_Metrics.csv",
+                "text/csv"
+            )
+        else:
+            st.warning("Comps model not available")
+
+    with model_tabs[3]:
+        validation_path = files.get("validation")
+        if validation_path and os.path.exists(validation_path):
+            df = pd.read_csv(validation_path)
+            st.dataframe(df, use_container_width=True, height=400)
+        else:
+            st.info("No validation report available")
 
 
-def render_data_tab():
-    """Render the normalized data view."""
-    st.markdown("### Normalized Financial Data")
-
-    if not st.session_state.current_session or not st.session_state.pipeline_result:
-        st.info("Run the pipeline first to see data.")
+def render_data_view():
+    """Render normalized data view."""
+    if not st.session_state.current_session:
+        st.info("No data available. Process your data first.")
         return
 
     sm = st.session_state.session_manager
@@ -652,220 +861,16 @@ def render_data_tab():
     with col2:
         st.metric("Mapped", valid, delta=f"{valid/total*100:.0f}%" if total > 0 else "0%")
     with col3:
-        st.metric("Unmapped", unmapped, delta_color="inverse" if unmapped > 0 else "off")
+        st.metric("Unmapped", unmapped)
 
     st.divider()
-
-    # Data table with highlighting
-    def highlight_status(val):
-        if val == 'VALID':
-            return 'background-color: #d4edda'
-        elif val == 'UNMAPPED':
-            return 'background-color: #f8d7da'
-        return ''
-
-    if 'Status' in df.columns:
-        styled_df = df.style.applymap(highlight_status, subset=['Status'])
-        st.dataframe(styled_df, use_container_width=True, height=400)
-    else:
-        st.dataframe(df, use_container_width=True, height=400)
+    st.dataframe(df, use_container_width=True, height=400)
 
 
-def check_model_has_data(df: pd.DataFrame) -> dict:
-    """
-    Check if a model DataFrame has actual data (non-zero values).
-    Returns dict with validation info.
-    """
-    if df is None or df.empty:
-        return {'valid': False, 'error': 'No data available'}
-
-    # Check for critical zero values
-    critical_rows = ['Total Revenue', 'Revenue', 'EBITDA', 'Net Income']
-    zero_criticals = []
-
-    for row in critical_rows:
-        if row in df.index:
-            row_values = df.loc[row]
-            if isinstance(row_values, pd.Series):
-                if row_values.sum() == 0:
-                    zero_criticals.append(row)
-
-    if zero_criticals:
-        return {
-            'valid': False,
-            'error': f"Critical values are zero: {', '.join(zero_criticals)}",
-            'zero_buckets': zero_criticals
-        }
-
-    return {'valid': True, 'error': None}
-
-
-def render_models_tab():
-    """Render the IB models output view with enhanced error handling."""
-    st.markdown("### Investment Banking Models")
-
-    if not st.session_state.current_session or not st.session_state.pipeline_result:
-        st.info("Run the pipeline first to see models.")
-        return
-
-    # Check if pipeline had errors
-    result = st.session_state.pipeline_result
-    if not result.get("success"):
-        st.error(f"Pipeline Error: {result.get('error', 'Unknown error')}")
-        st.warning("Models may not be available due to pipeline failure.")
-
-    sm = st.session_state.session_manager
-    files = sm.get_session_files(st.session_state.current_session.session_id)
-
-    model_tabs = st.tabs(["DCF Setup", "LBO Stats", "Comps Metrics", "Validation", "Engine Log"])
-
-    with model_tabs[0]:
-        dcf_path = files.get("dcf")
-        # Check file existence explicitly
-        if dcf_path and os.path.exists(dcf_path):
-            try:
-                df = pd.read_csv(dcf_path, index_col=0)
-
-                # Validate the data
-                validation = check_model_has_data(df)
-                if not validation['valid']:
-                    st.error(f"DCF Model Issue: {validation['error']}")
-                    st.warning("The model contains zero values in critical buckets. This may indicate mapping issues.")
-
-                    # Show the data anyway for debugging
-                    with st.expander("View Raw DCF Data (Debug)", expanded=False):
-                        st.dataframe(df, use_container_width=True, height=300)
-                else:
-                    st.dataframe(df, use_container_width=True, height=400)
-                    st.download_button(
-                        "Download DCF CSV",
-                        df.to_csv().encode('utf-8'),
-                        "DCF_Historical_Setup.csv",
-                        "text/csv"
-                    )
-            except Exception as e:
-                st.error(f"Error reading DCF file: {str(e)}")
-        else:
-            st.error("DCF Data Not Available")
-            st.markdown("""
-            **Possible causes:**
-            1. Pipeline failed to complete
-            2. No valid financial data was mapped
-            3. Engine encountered critical errors
-
-            **Check the Engine Log tab for details.**
-            """)
-
-    with model_tabs[1]:
-        lbo_path = files.get("lbo")
-        if lbo_path and os.path.exists(lbo_path):
-            try:
-                df = pd.read_csv(lbo_path, index_col=0)
-                validation = check_model_has_data(df)
-                if not validation['valid']:
-                    st.warning(f"LBO Model Issue: {validation['error']}")
-                st.dataframe(df, use_container_width=True, height=400)
-                st.download_button(
-                    "Download LBO CSV",
-                    df.to_csv().encode('utf-8'),
-                    "LBO_Credit_Stats.csv",
-                    "text/csv"
-                )
-            except Exception as e:
-                st.error(f"Error reading LBO file: {str(e)}")
-        else:
-            st.warning("LBO data not available - check Engine Log for errors")
-
-    with model_tabs[2]:
-        comps_path = files.get("comps")
-        if comps_path and os.path.exists(comps_path):
-            try:
-                df = pd.read_csv(comps_path, index_col=0)
-                validation = check_model_has_data(df)
-                if not validation['valid']:
-                    st.warning(f"Comps Model Issue: {validation['error']}")
-                st.dataframe(df, use_container_width=True, height=400)
-                st.download_button(
-                    "Download Comps CSV",
-                    df.to_csv().encode('utf-8'),
-                    "Comps_Trading_Metrics.csv",
-                    "text/csv"
-                )
-            except Exception as e:
-                st.error(f"Error reading Comps file: {str(e)}")
-        else:
-            st.warning("Comps data not available - check Engine Log for errors")
-
-    with model_tabs[3]:
-        validation_path = files.get("validation")
-        if validation_path and os.path.exists(validation_path):
-            df = pd.read_csv(validation_path)
-            # Highlight failures
-            def highlight_status(val):
-                if val == 'FAIL':
-                    return 'background-color: #f8d7da; color: #721c24'
-                elif val == 'WARN':
-                    return 'background-color: #fff3cd; color: #856404'
-                elif val == 'PASS':
-                    return 'background-color: #d4edda; color: #155724'
-                return ''
-
-            if 'Status' in df.columns:
-                styled_df = df.style.applymap(highlight_status, subset=['Status'])
-                st.dataframe(styled_df, use_container_width=True, height=400)
-            else:
-                st.dataframe(df, use_container_width=True, height=400)
-        else:
-            st.info("No validation report available")
-
-    with model_tabs[4]:
-        st.markdown("### Engine Execution Log")
-
-        # Show pipeline result details
-        if result:
-            if result.get("success"):
-                st.success(f"Pipeline completed in {result.get('duration', 0):.2f}s")
-            else:
-                st.error(f"Pipeline failed: {result.get('error', 'Unknown')}")
-
-        # Show unmapped data if available
-        unmapped_path = files.get("unmapped")
-        if unmapped_path and os.path.exists(unmapped_path):
-            unmapped_df = pd.read_csv(unmapped_path)
-            if len(unmapped_df) > 0:
-                st.warning(f"{len(unmapped_df)} items could not be mapped")
-                with st.expander("View Unmapped Items"):
-                    st.dataframe(unmapped_df, use_container_width=True, height=200)
-
-        # Show hierarchy resolutions
-        hierarchy_path = files.get("hierarchy")
-        if hierarchy_path and os.path.exists(hierarchy_path):
-            hierarchy_df = pd.read_csv(hierarchy_path)
-            if len(hierarchy_df) > 0:
-                st.info(f"{len(hierarchy_df)} hierarchy conflicts resolved (prevented double-counting)")
-                with st.expander("View Hierarchy Resolutions"):
-                    st.dataframe(hierarchy_df, use_container_width=True, height=200)
-
-    # Download all as ZIP
-    st.divider()
-    if st.session_state.current_session:
-        zip_data = create_download_zip(st.session_state.current_session.session_id)
-        st.download_button(
-            label="Download All Outputs (ZIP)",
-            data=zip_data,
-            file_name=f"financex_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-            mime="application/zip",
-            type="primary"
-        )
-
-
-def render_fix_unmapped_tab():
-    """Render the fix unmapped items interface."""
-    st.markdown("### Teach the System")
-    st.markdown("Map unknown items here. Changes are saved to `aliases.csv` for future runs.")
-
-    if not st.session_state.current_session or not st.session_state.pipeline_result:
-        st.info("Run the pipeline first to see unmapped items.")
+def render_fix_unmapped():
+    """Render fix unmapped interface with brain learning."""
+    if not st.session_state.current_session:
+        st.info("No data available. Process your data first.")
         return
 
     sm = st.session_state.session_manager
@@ -878,13 +883,13 @@ def render_fix_unmapped_tab():
     df = pd.read_csv(files["normalized"])
 
     if 'Status' not in df.columns:
-        st.warning("Status column not found in data.")
+        st.warning("Status column not found.")
         return
 
     unmapped_items = df[df['Status'] == 'UNMAPPED']['Source_Label'].unique()
 
     if len(unmapped_items) == 0:
-        st.success("No unmapped items! The data is clean.")
+        st.success("All items mapped successfully!")
         return
 
     st.warning(f"{len(unmapped_items)} items need mapping")
@@ -901,52 +906,186 @@ def render_fix_unmapped_tab():
             return
 
         target = st.selectbox(
-            "Search Official Taxonomy",
-            concepts_df['display'],
-            help="Type to search for 'Revenue', 'Assets', etc."
+            "Map to Taxonomy Concept",
+            concepts_df['display']
         )
 
-    if st.button("Save Mapping", type="primary"):
+    if st.button("Save Mapping & Learn", type="primary"):
         target_id = target.split(" (")[0]
         target_source = concepts_df[concepts_df['element_id'] == target_id]['source'].values[0]
 
+        # Save to aliases
         success, msg = save_new_alias(selected_label, target_id, target_source)
 
+        # Learn in brain
+        st.session_state.brain_manager.add_mapping(
+            source_label=selected_label,
+            target_element_id=target_id,
+            source_taxonomy=target_source,
+            notes="Learned from UI correction"
+        )
+
         if success:
-            st.success(f"Mapped '{selected_label}' -> '{target_id}'")
-            st.info("Re-run the pipeline to apply these changes.")
+            st.success(f"Mapped and learned: '{selected_label}' -> '{target_id}'")
+            st.info("Download your updated Brain to save this mapping permanently!")
         else:
             st.warning(msg)
 
 
+def render_downloads():
+    """Render downloads section."""
+    if not st.session_state.current_session:
+        st.info("No files available. Process your data first.")
+        return
+
+    st.markdown("### Download All Outputs")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        zip_data = create_download_zip(st.session_state.current_session.session_id)
+        st.download_button(
+            label="Download All Models (ZIP)",
+            data=zip_data,
+            file_name=f"financex_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True
+        )
+
+    with col2:
+        brain_json = st.session_state.brain_manager.to_json_string()
+        st.download_button(
+            label="Download Analyst Brain (JSON)",
+            data=brain_json,
+            file_name="analyst_brain.json",
+            mime="application/json",
+            use_container_width=True
+        )
+
+    st.divider()
+
+    st.markdown("### Individual Files")
+
+    sm = st.session_state.session_manager
+    files = sm.get_session_files(st.session_state.current_session.session_id)
+
+    for file_type, file_path in files.items():
+        if file_path and os.path.exists(file_path):
+            with open(file_path, 'rb') as f:
+                st.download_button(
+                    label=f"Download {os.path.basename(file_path)}",
+                    data=f.read(),
+                    file_name=os.path.basename(file_path),
+                    mime="text/csv"
+                )
+
+
+# -------------------------------------------------
+# HELPER FUNCTIONS
+# -------------------------------------------------
+def _extract_bucket_name(finding) -> str:
+    """Extract bucket name from finding for override purposes."""
+    message = finding.message.lower() if finding.message else ""
+    check_name = finding.check_name.lower() if finding.check_name else ""
+
+    bucket_patterns = {
+        "revenue": "Total Revenue",
+        "net income": "Net Income",
+        "ebitda": "EBITDA",
+        "cogs": "COGS",
+        "gross profit": "Gross Profit",
+        "operating": "Operating Income",
+        "capex": "CapEx",
+        "cash": "Cash",
+        "debt": "Total Debt",
+        "assets": "Total Assets",
+        "liabilities": "Total Liabilities",
+        "equity": "Equity",
+    }
+
+    for pattern, bucket in bucket_patterns.items():
+        if pattern in message or pattern in check_name:
+            return bucket
+
+    return None
+
+
+def _force_generate_template():
+    """Force generate template files despite errors."""
+    if not st.session_state.current_session:
+        st.error("No active session")
+        return
+
+    sm = st.session_state.session_manager
+    session_id = st.session_state.current_session.session_id
+    files = sm.get_session_files(session_id)
+
+    try:
+        with st.spinner("Force generating templates..."):
+            if files.get("dcf") and os.path.exists(files["dcf"]):
+                dcf_df = pd.read_csv(files["dcf"], index_col=0)
+            else:
+                periods = ["2024", "2023", "2022"]
+                dcf_template = {
+                    "Total Revenue": [0.0, 0.0, 0.0],
+                    "(-) COGS": [0.0, 0.0, 0.0],
+                    "(=) Gross Profit": [0.0, 0.0, 0.0],
+                    "(-) SG&A": [0.0, 0.0, 0.0],
+                    "(-) R&D": [0.0, 0.0, 0.0],
+                    "(=) EBITDA": [0.0, 0.0, 0.0],
+                    "(-) D&A": [0.0, 0.0, 0.0],
+                    "(=) EBIT": [0.0, 0.0, 0.0],
+                    "(-) Cash Taxes": [0.0, 0.0, 0.0],
+                    "(=) NOPAT": [0.0, 0.0, 0.0],
+                    "(-) CapEx": [0.0, 0.0, 0.0],
+                    "(=) Unlevered Free Cash Flow": [0.0, 0.0, 0.0],
+                }
+                dcf_df = pd.DataFrame(dcf_template, index=periods).T
+
+            # Apply overrides
+            for bucket_name, value in st.session_state.manual_overrides.items():
+                if bucket_name in dcf_df.index:
+                    for col in dcf_df.columns:
+                        dcf_df.loc[bucket_name, col] = value
+
+            dcf_df["_FORCED"] = "YES"
+
+            output_dir = sm.get_output_dir(session_id)
+            forced_path = os.path.join(output_dir, "DCF_Historical_Setup_FORCED.csv")
+            dcf_df.to_csv(forced_path)
+
+            if files.get("dcf"):
+                dcf_df.to_csv(files["dcf"])
+
+            st.success("Force generated successfully!")
+
+            csv_data = dcf_df.to_csv().encode('utf-8')
+            st.download_button(
+                label="Download Forced DCF",
+                data=csv_data,
+                file_name="DCF_Historical_Setup_FORCED.csv",
+                mime="text/csv",
+                type="primary"
+            )
+
+    except Exception as e:
+        st.error(f"Force generation failed: {str(e)}")
+
+
+# -------------------------------------------------
+# MAIN APPLICATION
+# -------------------------------------------------
 def main():
     """Main application entry point."""
     render_header()
     render_sidebar()
 
-    # Main content tabs
-    tabs = st.tabs([
-        "Upload",
-        "AI Auditor",
-        "Data View",
-        "IB Models",
-        "Fix Unmapped"
-    ])
-
-    with tabs[0]:
-        render_upload_tab()
-
-    with tabs[1]:
-        render_audit_tab()
-
-    with tabs[2]:
-        render_data_tab()
-
-    with tabs[3]:
-        render_models_tab()
-
-    with tabs[4]:
-        render_fix_unmapped_tab()
+    # Show onboarding or cockpit based on state
+    if not st.session_state.onboarding_complete:
+        render_onboarding()
+    else:
+        render_analyst_cockpit()
 
 
 if __name__ == "__main__":

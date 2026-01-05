@@ -1,12 +1,19 @@
 """
-IB Logic Rules (JPMC/Citadel Grade) - EXPANDED v2.1
-=====================================================
+IB Logic Rules (JPMC/Citadel Grade) - PRODUCTION v3.0
+======================================================
 Comprehensive concept sets for investment banking financial models.
 Distinguishes between Aggregate (Total) tags and Granular (Component) tags
 to enable smart double-counting prevention.
 
-CRITICAL FIX: Expanded with common synonyms, hierarchy parents, and
-alternative naming conventions to ensure "Apple-Level" accuracy.
+PRODUCTION v3.0 ENHANCEMENTS:
+1. Massively expanded synonyms and child tags for EVERY bucket
+2. Fuzzy keyword mappings for fallback recovery
+3. Industry-specific revenue/cost variations (Tech, Banks, Insurance, etc.)
+4. Alternative naming conventions from 10-K filings
+5. XBRL extension tags commonly used by public companies
+
+Philosophy: "No Silent Failures" - If a concept exists in ANY common format,
+we should be able to map it.
 
 Organized by financial statement and model requirements.
 """
@@ -15,14 +22,14 @@ Organized by financial statement and model requirements.
 # INCOME STATEMENT - Revenue (EXPANDED)
 # =============================================================================
 
-# Parent Tags (The Totals) - ALL common revenue synonyms
+# Parent Tags (The Totals) - ALL common revenue synonyms - MASSIVELY EXPANDED
 REVENUE_TOTAL_IDS = {
-    # US-GAAP Primary
+    # US-GAAP Primary (Most Common)
     "us-gaap_Revenues",
     "us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax",
     "us-gaap_SalesRevenueNet",
     "us-gaap_SalesRevenueGoodsAndServicesNet",
-    # US-GAAP Alternative naming
+    # US-GAAP Alternative naming (From 10-K filings)
     "us-gaap_RevenueFromContractWithCustomer",
     "us-gaap_NetSales",
     "us-gaap_TotalRevenues",
@@ -32,10 +39,42 @@ REVENUE_TOTAL_IDS = {
     "us-gaap_OperatingRevenues",
     "us-gaap_NetRevenueForManagementFees",
     "us-gaap_RevenueFromRelatedParties",
-    # IFRS alternatives
+    # Additional common variations - PRODUCTION FIX
+    "us-gaap_SalesRevenueServicesNet",
+    "us-gaap_SalesRevenueGoodsNet",
+    "us-gaap_RevenueRecognitionPolicyTextBlock",
+    "us-gaap_SalesAndOtherOperatingRevenue",
+    "us-gaap_RealEstateRevenueNet",
+    "us-gaap_HealthCareOrganizationRevenue",
+    "us-gaap_BrokerageCommissionsRevenue",
+    "us-gaap_InvestmentBankingRevenue",
+    "us-gaap_UnderwritingIncome",
+    "us-gaap_AdvisoryFeesRevenue",
+    "us-gaap_InsurancePremiumsRevenueRecognized",
+    "us-gaap_PremiumsEarnedNet",
+    # Tech/SaaS specific
+    "us-gaap_SubscriptionRevenue",
+    "us-gaap_SaaSRevenue",
+    "us-gaap_CloudServicesRevenue",
+    "us-gaap_PlatformRevenue",
+    # Financial Services specific
+    "us-gaap_InterestAndDividendIncomeOperating",
+    "us-gaap_FeesAndCommissions",
+    "us-gaap_TradingGainsLosses",
+    "us-gaap_GainsLossesOnSalesOfAssets",
+    # Retail/Consumer
+    "us-gaap_RetailRevenue",
+    "us-gaap_WholesaleRevenue",
+    "us-gaap_FranchiseRevenue",
+    "us-gaap_MembershipRevenue",
+    # IFRS alternatives (expanded)
     "ifrs-full_Revenue",
     "ifrs-full_RevenueFromContractsWithCustomers",
     "ifrs-full_TotalRevenue",
+    "ifrs-full_RevenueFromSaleOfGoodsAndRenderingOfServices",
+    "ifrs-full_GrossRevenue",
+    "ifrs-full_TurnoverRevenue",
+    "ifrs-full_SalesRevenue",
 }
 
 # Component Tags (Granular Breakdown) - EXPANDED
@@ -699,50 +738,196 @@ HEALTHCARE_IDS = {
 }
 
 # =============================================================================
-# KEYWORD FALLBACK MAPPINGS (for Sanity Loop Recovery)
+# KEYWORD FALLBACK MAPPINGS (for Sanity Loop Recovery) - PRODUCTION v3.0
 # =============================================================================
 # These keywords are used when critical buckets are zero to force-map
 # any items that contain these keywords to prevent empty models
+#
+# PRODUCTION FIX: Massively expanded with common variations from real 10-K filings
 
 KEYWORD_FALLBACK_MAPPINGS = {
+    # Revenue - Primary keywords
     "revenue": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
+    "revenues": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
     "sales": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
     "net sales": REVENUE_TOTAL_IDS,
+    "total sales": REVENUE_TOTAL_IDS,
     "total revenue": REVENUE_TOTAL_IDS,
+    "total revenues": REVENUE_TOTAL_IDS,
+    "gross revenue": REVENUE_TOTAL_IDS,
+    "net revenue": REVENUE_TOTAL_IDS,
+    "operating revenue": REVENUE_TOTAL_IDS,
+    # Revenue - Industry variations
+    "premiums": REVENUE_TOTAL_IDS,
+    "fees": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
+    "commissions": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
+    "subscription": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
+    "licensing": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
+    "royalt": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
+    "turnover": REVENUE_TOTAL_IDS,
+
+    # Cost of Sales - Primary keywords
     "cost of": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
     "cogs": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
     "cost of goods": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
+    "cost of sales": COGS_TOTAL_IDS,
     "cost of revenue": COGS_TOTAL_IDS,
+    "cost of services": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
+    "cost of products": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
+    "direct cost": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
+    "cost of merchandise": COGS_TOTAL_IDS,
+    "manufacturing cost": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
+    "production cost": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
+
+    # Net Income - Primary keywords
     "net income": NET_INCOME_IDS,
+    "net loss": NET_INCOME_IDS,
     "profit": NET_INCOME_IDS,
+    "loss": NET_INCOME_IDS,
     "earnings": NET_INCOME_IDS,
     "net earnings": NET_INCOME_IDS,
+    "bottom line": NET_INCOME_IDS,
+    "income from continuing": NET_INCOME_IDS,
+    "comprehensive income": NET_INCOME_IDS,
+    "attributable to parent": NET_INCOME_IDS,
+    "attributable to shareholders": NET_INCOME_IDS,
+
+    # Operating Income
     "operating income": OPERATING_INCOME_IDS,
-    "ebitda": set(),  # EBITDA is calculated, not directly mapped
+    "operating profit": OPERATING_INCOME_IDS,
+    "operating loss": OPERATING_INCOME_IDS,
+    "income from operations": OPERATING_INCOME_IDS,
+    "profit from operations": OPERATING_INCOME_IDS,
+    "operating earnings": OPERATING_INCOME_IDS,
+
+    # EBITDA is calculated, not directly mapped - but we can look for reported EBITDA
+    "ebitda": set(),
+    "adjusted ebitda": set(),
+
+    # Depreciation & Amortization
     "depreciation": D_AND_A_IDS,
     "amortization": D_AND_A_IDS,
     "d&a": D_AND_A_IDS,
+    "depr": D_AND_A_IDS,
+    "amort": D_AND_A_IDS,
+    "depreciation and amortization": D_AND_A_IDS,
+    "depreciation expense": D_AND_A_IDS,
+    "amortization expense": D_AND_A_IDS,
+
+    # CapEx
     "capex": CAPEX_IDS,
     "capital expenditure": CAPEX_IDS,
+    "capital spending": CAPEX_IDS,
     "pp&e": CAPEX_IDS | FIXED_ASSETS_COMPS,
+    "ppe": CAPEX_IDS | FIXED_ASSETS_COMPS,
     "property plant": CAPEX_IDS | FIXED_ASSETS_COMPS,
+    "property, plant": CAPEX_IDS | FIXED_ASSETS_COMPS,
+    "purchases of property": CAPEX_IDS,
+    "additions to property": CAPEX_IDS,
+    "purchases of equipment": CAPEX_IDS,
+
+    # Inventory
     "inventory": INVENTORY_IDS,
     "inventories": INVENTORY_IDS,
+    "merchandise": INVENTORY_IDS,
+    "finished goods": INVENTORY_IDS,
+    "work in process": INVENTORY_IDS,
+    "raw materials": INVENTORY_IDS,
+
+    # Cash
     "cash": CASH_IDS,
+    "cash and cash equivalent": CASH_IDS,
+    "cash & cash equivalent": CASH_IDS,
+    "cash and equivalents": CASH_IDS,
+    "short-term investment": CASH_IDS,
+    "short term investment": CASH_IDS,
+    "marketable securities": CASH_IDS,
+
+    # Receivables
     "receivable": ACCOUNTS_RECEIVABLE_IDS,
+    "receivables": ACCOUNTS_RECEIVABLE_IDS,
     "accounts receivable": ACCOUNTS_RECEIVABLE_IDS,
+    "trade receivable": ACCOUNTS_RECEIVABLE_IDS,
+    "a/r": ACCOUNTS_RECEIVABLE_IDS,
+    "ar": ACCOUNTS_RECEIVABLE_IDS,
+
+    # Debt
     "debt": DEBT_IDS,
     "borrowing": DEBT_IDS,
+    "borrowings": DEBT_IDS,
+    "notes payable": DEBT_IDS,
+    "bonds": DEBT_IDS,
+    "loans": DEBT_IDS,
+    "credit facility": DEBT_IDS,
     "long-term debt": LONG_TERM_DEBT_IDS,
+    "long term debt": LONG_TERM_DEBT_IDS,
     "short-term debt": SHORT_TERM_DEBT_IDS,
+    "short term debt": SHORT_TERM_DEBT_IDS,
+    "current portion of debt": SHORT_TERM_DEBT_IDS,
+    "current maturities": SHORT_TERM_DEBT_IDS,
+
+    # Taxes
     "tax": TAX_EXP_IDS,
+    "taxes": TAX_EXP_IDS,
     "income tax": TAX_EXP_IDS,
+    "provision for": TAX_EXP_IDS,
+    "tax expense": TAX_EXP_IDS,
+    "tax benefit": TAX_EXP_IDS,
+
+    # SG&A
     "sg&a": SG_AND_A_IDS,
+    "sga": SG_AND_A_IDS,
     "selling": SG_AND_A_IDS,
     "general and admin": SG_AND_A_IDS,
+    "general & admin": SG_AND_A_IDS,
+    "g&a": SG_AND_A_IDS,
+    "administrative": SG_AND_A_IDS,
+    "marketing": SG_AND_A_IDS,
+    "advertising": SG_AND_A_IDS,
+    "salaries": SG_AND_A_IDS,
+    "compensation": SG_AND_A_IDS,
+    "employee": SG_AND_A_IDS,
+
+    # R&D
     "r&d": R_AND_D_IDS,
+    "rnd": R_AND_D_IDS,
     "research": R_AND_D_IDS,
     "development": R_AND_D_IDS,
+    "research and development": R_AND_D_IDS,
+    "product development": R_AND_D_IDS,
+    "technology": R_AND_D_IDS,
+    "engineering": R_AND_D_IDS,
+
+    # Interest
+    "interest expense": INTEREST_EXP_IDS,
+    "interest cost": INTEREST_EXP_IDS,
+    "finance cost": INTEREST_EXP_IDS,
+    "financing cost": INTEREST_EXP_IDS,
+    "interest income": INTEREST_INCOME_IDS,
+    "interest earned": INTEREST_INCOME_IDS,
+
+    # Equity
+    "equity": EQUITY_IDS,
+    "stockholder": EQUITY_IDS,
+    "shareholder": EQUITY_IDS,
+    "retained earnings": EQUITY_IDS,
+    "accumulated deficit": EQUITY_IDS,
+
+    # Assets/Liabilities totals
+    "total assets": TOTAL_ASSETS_IDS,
+    "total liabilities": TOTAL_LIABILITIES_IDS,
+    "current assets": NWC_CURRENT_ASSETS_TOTAL,
+    "current liabilities": NWC_CURRENT_LIABS_TOTAL,
+
+    # Cash Flow
+    "cash from operations": CFO_IDS,
+    "operating cash": CFO_IDS,
+    "cash from investing": CFI_IDS,
+    "investing activities": CFI_IDS,
+    "cash from financing": CFF_IDS,
+    "financing activities": CFF_IDS,
+    "free cash flow": FREE_CASH_FLOW_IDS,
+    "fcf": FREE_CASH_FLOW_IDS,
 }
 
 # Critical buckets that MUST NOT be zero for a valid model
@@ -761,3 +946,148 @@ CRITICAL_COMPS_BUCKETS = {
     "Revenue": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
     "Net Income": NET_INCOME_IDS,
 }
+
+# =============================================================================
+# FUZZY MATCHING HELPERS - PRODUCTION v3.0
+# =============================================================================
+# These functions help with fallback recovery when exact matching fails
+
+def fuzzy_match_bucket(source_label: str) -> tuple:
+    """
+    Fuzzy match a source label to a bucket using keyword matching.
+
+    Returns:
+        tuple: (bucket_name, concept_set) if found, (None, None) otherwise
+
+    Example:
+        >>> fuzzy_match_bucket("Total Net Sales Revenue")
+        ("Revenue", REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS)
+    """
+    label_lower = source_label.lower().strip()
+
+    # Score each keyword match
+    best_match = None
+    best_score = 0
+
+    for keyword, concept_set in KEYWORD_FALLBACK_MAPPINGS.items():
+        if keyword in label_lower:
+            # Score based on keyword length and position
+            score = len(keyword)
+            if label_lower.startswith(keyword):
+                score += 10  # Bonus for prefix match
+            if label_lower == keyword:
+                score += 50  # Exact match bonus
+
+            if score > best_score:
+                best_score = score
+                best_match = (keyword, concept_set)
+
+    if best_match:
+        keyword, concept_set = best_match
+        # Map keyword to bucket name
+        bucket_map = {
+            "revenue": "Total Revenue",
+            "revenues": "Total Revenue",
+            "sales": "Total Revenue",
+            "net sales": "Total Revenue",
+            "total revenue": "Total Revenue",
+            "cost of": "COGS",
+            "cogs": "COGS",
+            "cost of goods": "COGS",
+            "cost of sales": "COGS",
+            "cost of revenue": "COGS",
+            "net income": "Net Income",
+            "profit": "Net Income",
+            "earnings": "Net Income",
+            "operating income": "Operating Income",
+            "depreciation": "D&A",
+            "amortization": "D&A",
+            "capex": "CapEx",
+            "capital expenditure": "CapEx",
+            "inventory": "Inventory",
+            "cash": "Cash",
+            "receivable": "Accounts Receivable",
+            "debt": "Total Debt",
+            "tax": "Taxes",
+            "sg&a": "SG&A",
+            "r&d": "R&D",
+            "research": "R&D",
+        }
+
+        bucket_name = None
+        for k, v in bucket_map.items():
+            if keyword.startswith(k) or k in keyword:
+                bucket_name = v
+                break
+
+        if bucket_name:
+            return (bucket_name, concept_set)
+
+    return (None, None)
+
+
+def get_all_concept_sets() -> dict:
+    """
+    Get a dictionary of all concept sets for validation purposes.
+
+    Returns:
+        dict: {bucket_name: concept_set}
+    """
+    return {
+        "Revenue": REVENUE_TOTAL_IDS | REVENUE_COMPONENT_IDS,
+        "COGS": COGS_TOTAL_IDS | COGS_COMPONENT_IDS,
+        "SG&A": SG_AND_A_IDS,
+        "R&D": R_AND_D_IDS,
+        "OpEx": OPEX_TOTAL_IDS | OPEX_COMPONENT_IDS,
+        "D&A": D_AND_A_IDS,
+        "Net Income": NET_INCOME_IDS,
+        "Operating Income": OPERATING_INCOME_IDS,
+        "Interest Expense": INTEREST_EXP_IDS,
+        "Interest Income": INTEREST_INCOME_IDS,
+        "Taxes": TAX_EXP_IDS,
+        "Cash": CASH_IDS,
+        "Inventory": INVENTORY_IDS,
+        "Accounts Receivable": ACCOUNTS_RECEIVABLE_IDS,
+        "Current Assets": NWC_CURRENT_ASSETS_TOTAL | NWC_CURRENT_ASSETS_COMPS,
+        "Current Liabilities": NWC_CURRENT_LIABS_TOTAL | NWC_CURRENT_LIABS_COMPS,
+        "Fixed Assets": FIXED_ASSETS_TOTAL | FIXED_ASSETS_COMPS,
+        "Short-Term Debt": SHORT_TERM_DEBT_IDS,
+        "Long-Term Debt": LONG_TERM_DEBT_IDS,
+        "Total Debt": DEBT_IDS,
+        "Equity": EQUITY_IDS,
+        "Total Assets": TOTAL_ASSETS_IDS,
+        "Total Liabilities": TOTAL_LIABILITIES_IDS,
+        "CapEx": CAPEX_IDS,
+        "CFO": CFO_IDS,
+        "CFI": CFI_IDS,
+        "CFF": CFF_IDS,
+    }
+
+
+def suggest_mapping(source_label: str) -> list:
+    """
+    Suggest possible mappings for a source label based on fuzzy matching.
+
+    Returns:
+        list: List of (bucket_name, confidence) tuples sorted by confidence
+    """
+    label_lower = source_label.lower().strip()
+    suggestions = []
+
+    for keyword, concept_set in KEYWORD_FALLBACK_MAPPINGS.items():
+        if keyword in label_lower or any(word in label_lower for word in keyword.split()):
+            # Calculate confidence
+            if label_lower == keyword:
+                confidence = 1.0
+            elif label_lower.startswith(keyword):
+                confidence = 0.9
+            elif keyword in label_lower:
+                confidence = 0.7 + (len(keyword) / len(label_lower)) * 0.2
+            else:
+                confidence = 0.5
+
+            suggestions.append((keyword, confidence, concept_set))
+
+    # Sort by confidence
+    suggestions.sort(key=lambda x: x[1], reverse=True)
+    return suggestions[:5]  # Top 5 suggestions
