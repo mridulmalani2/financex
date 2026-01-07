@@ -65,32 +65,60 @@ class ThinkingLogger:
         """Initialize the thinking logger."""
         if log_dir is None:
             log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
-        os.makedirs(log_dir, exist_ok=True)
 
-        self.log_path = os.path.join(log_dir, "engine_thinking.log")
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except (OSError, PermissionError) as e:
+            print(f"  WARNING: Cannot create log directory {log_dir}: {e}")
+            log_dir = None
+
+        self.log_path = os.path.join(log_dir, "engine_thinking.log") if log_dir else None
         self.entries: List[str] = []
         self.start_time = datetime.now()
+        self.write_errors = 0
+        self.max_write_errors = 5  # Stop warning after 5 errors
 
+        # INVARIANT ENFORCEMENT: Thinking logs must be written (with error handling)
         # Initialize log file
         self._write_header()
 
     def _write_header(self):
         """Write log header."""
-        with open(self.log_path, 'w', encoding='utf-8') as f:
-            f.write("=" * 70 + "\n")
-            f.write("FINANCEX ITERATIVE THINKING ENGINE LOG\n")
-            f.write("=" * 70 + "\n")
-            f.write(f"Started: {self.start_time.isoformat()}\n")
-            f.write("=" * 70 + "\n\n")
+        if not self.log_path:
+            return  # No log path available
+
+        try:
+            with open(self.log_path, 'w', encoding='utf-8') as f:
+                f.write("=" * 70 + "\n")
+                f.write("FINANCEX ITERATIVE THINKING ENGINE LOG\n")
+                f.write("=" * 70 + "\n")
+                f.write(f"Started: {self.start_time.isoformat()}\n")
+                f.write("=" * 70 + "\n\n")
+        except (OSError, PermissionError, IOError) as e:
+            self.write_errors += 1
+            if self.write_errors <= self.max_write_errors:
+                print(f"  WARNING: Cannot write thinking log header: {e}")
+                print(f"  Thinking logs will be kept in memory only")
 
     def log(self, message: str, level: str = "INFO"):
         """Log a message with timestamp."""
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         entry = f"[{timestamp}] [{level}] {message}"
+
+        # Always keep in memory (fallback if file write fails)
         self.entries.append(entry)
 
-        with open(self.log_path, 'a', encoding='utf-8') as f:
-            f.write(entry + "\n")
+        # Try to write to file
+        if self.log_path:
+            try:
+                with open(self.log_path, 'a', encoding='utf-8') as f:
+                    f.write(entry + "\n")
+            except (OSError, PermissionError, IOError) as e:
+                self.write_errors += 1
+                if self.write_errors <= self.max_write_errors:
+                    print(f"  WARNING: Cannot write to thinking log: {e}")
+                    if self.write_errors == self.max_write_errors:
+                        print(f"  (Suppressing further log write warnings)")
 
         # Also log to console for visibility
         if level == "THINK":
