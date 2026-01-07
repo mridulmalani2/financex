@@ -35,7 +35,22 @@ class TaxonomyEngine:
     def connect(self):
         if not os.path.exists(self.db_path):
             raise FileNotFoundError(f"Taxonomy database not found: {self.db_path}")
-        self.conn = sqlite3.connect(self.db_path)
+
+        # INVARIANT ENFORCEMENT: Taxonomy database must be read-only
+        # Check file permissions and open in read-only mode
+        if not os.access(self.db_path, os.R_OK):
+            raise PermissionError(f"Cannot read taxonomy database: {self.db_path}")
+
+        # Open database in read-only mode (uri=True enables read-only flag)
+        db_uri = f"file:{self.db_path}?mode=ro"
+        try:
+            self.conn = sqlite3.connect(db_uri, uri=True)
+        except sqlite3.OperationalError as e:
+            # If read-only mode fails, open normally but warn
+            print(f"  WARNING: Could not open database in read-only mode: {e}")
+            print(f"  Opening in normal mode - taxonomy modifications are NOT ALLOWED")
+            self.conn = sqlite3.connect(self.db_path)
+
         self.conn.row_factory = sqlite3.Row
         self._build_caches()
 
@@ -73,15 +88,35 @@ class TaxonomyEngine:
             WHERE c_parent.element_id IS NOT NULL AND c_child.element_id IS NOT NULL
             ORDER BY calc.order_index
         """)
+        invalid_weights = []
         for row in cur.fetchall():
             parent_id = row['parent_id']
+            weight = row['weight']
+
+            # INVARIANT ENFORCEMENT: Calculation weights must be ±1.0 per XBRL spec
+            if weight not in (1.0, -1.0):
+                invalid_weights.append({
+                    'parent': parent_id,
+                    'child': row['child_id'],
+                    'weight': weight
+                })
+                # Coerce to nearest valid value
+                weight = 1.0 if weight > 0 else -1.0
+
             if parent_id not in self._calc_tree_cache:
                 self._calc_tree_cache[parent_id] = []
             self._calc_tree_cache[parent_id].append({
                 'child_id': row['child_id'],
-                'weight': row['weight'],
+                'weight': weight,
                 'order': row['order_index']
             })
+
+        if invalid_weights:
+            print(f"    WARNING: Found {len(invalid_weights)} calculation relationships with invalid weights (not ±1.0)")
+            print(f"    Invalid weights coerced to ±1.0. First 5 examples:")
+            for item in invalid_weights[:5]:
+                print(f"      {item['parent']} -> {item['child']}: weight={item['weight']}")
+
         print(f"    Cached {len(self._calc_tree_cache):,} calculation parents")
 
         # Cache presentation hierarchy (child -> parents)
