@@ -60,8 +60,8 @@ def print_banner():
 ║   ██║     ██║██║ ╚████║██║  ██║██║ ╚████║╚██████╗███████╗██╔╝ ██╗    ║
 ║   ╚═╝     ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝    ║
 ║                                                                       ║
-║   Automated Financial Workbench for Investment Banking               ║
-║   Quality: JPMC / Citadel Grade                                       ║
+║   Automated Financial Workbench                                      ║
+║   Professional Financial Analysis Platform                           ║
 ║                                                                       ║
 ╚═══════════════════════════════════════════════════════════════════════╝
     """)
@@ -421,7 +421,7 @@ def main():
         print(f"  - {outputs.get('comps', 'N/A')}")
         print(f"  - {outputs.get('validation', 'N/A')}")
         print(f"\nThinking Log: {thinking_log}")
-        print("\nThese files are JPMC/Citadel-grade and ready for:")
+        print("\nThese files are ready for:")
         print("  - DCF Valuation Modeling")
         print("  - LBO / Leverage Analysis")
         print("  - Trading Comparables Analysis")

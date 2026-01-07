@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-FinanceX: Production V1.0 - Goldman-Futuristic Interface
-==========================================================
-JPMC/Citadel-Grade Financial Workbench with:
+FinanceX: Production V1.0 - Professional Financial Analysis
+===========================================================
+Automated Financial Workbench with:
 
 1. ONBOARDING JOURNEY - 3-step guide for new users
 2. ANALYST BRAIN (BYOB) - Portable JSON memory upload/download
 3. ANALYST COCKPIT - Grouped audits with interactive fixes
-4. GLASSMORPHISM UI - High-Finance Aesthetic
+4. GLASSMORPHISM UI - Modern Professional Design
 
 Flow: Onboarding -> Upload Brain -> Process -> Audit -> Download
 """
@@ -395,11 +395,11 @@ def create_download_zip(session_id: str) -> bytes:
 # MAIN HEADER
 # -------------------------------------------------
 def render_header():
-    """Render the Goldman-style header."""
+    """Render the main header."""
     st.markdown("""
     <div class="main-header">
         <h1>FinanceX</h1>
-        <p>Investment Banking-Grade Financial Analysis | Production V1.0</p>
+        <p>Professional Financial Analysis | Production V1.0</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -519,7 +519,7 @@ def render_onboarding():
     st.markdown("""
     <div class="glass-card glass-card-highlight" style="text-align: center; padding: 40px;">
         <h2 style="color: #c9a962; margin-bottom: 8px;">Welcome to FinanceX</h2>
-        <p style="color: #a1a1aa; font-size: 1.1rem;">Investment Banking-Grade Financial Analysis</p>
+        <p style="color: #a1a1aa; font-size: 1.1rem;">Professional Financial Analysis Platform</p>
     </div>
     """, unsafe_allow_html=True)
 
