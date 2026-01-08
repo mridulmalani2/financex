@@ -9,12 +9,18 @@ PRODUCTION v3.0 - BYOB Architecture Integration:
   - Integrates with Analyst Brain (portable JSON memory)
   - Brain mappings have HIGHEST priority (user memory wins)
 
+PRODUCTION v3.1 - CONFIDENCE SCORING:
+  - Every mapping carries a deterministic confidence score (0.0 to 1.0)
+  - Confidence based on mapping resolution tier
+  - Fully explainable and traceable
+
 Resolution Order:
-  0. Analyst Brain (user's JSON memory) -> HIGHEST priority
-  1. Alias Lookup (config/aliases.csv) -> High priority overrides
-  2. Exact Label Match (DB Reverse Index) -> Official taxonomy labels
-  3. SAFE MODE: Hierarchy Fallback -> Walk up presentation tree
-  4. Fallback: Unmapped (Error)
+  0. Analyst Brain (user's JSON memory) -> HIGHEST priority (confidence: 1.00)
+  1. Alias Lookup (config/aliases.csv) -> High priority overrides (confidence: 0.95)
+  2. Exact Label Match (DB Reverse Index) -> Official taxonomy labels (confidence: 0.90)
+  3. Keyword Match -> Fuzzy matching (confidence: 0.70)
+  4. SAFE MODE: Hierarchy Fallback -> Walk up presentation tree (confidence: 0.50-0.70)
+  5. Fallback: Unmapped (Error) -> Failed to map (confidence: 0.00)
 
 Safe Mode Feature:
   When a granular concept can't be mapped directly, the mapper walks up
@@ -40,6 +46,15 @@ try:
 except ImportError:
     BRAIN_AVAILABLE = False
     print("  Warning: Brain Manager not available. BYOB features disabled.")
+
+# Import Confidence Engine
+try:
+    from utils.confidence_engine import calculate_mapping_confidence
+    from utils.lineage_graph import MappingSource
+    CONFIDENCE_ENGINE_AVAILABLE = True
+except ImportError:
+    CONFIDENCE_ENGINE_AVAILABLE = False
+    print("  Warning: Confidence Engine not available. Confidence scoring disabled.")
 
 # -------------------------------------------------
 # CONFIGURATION
@@ -373,14 +388,14 @@ class FinancialMapper:
         The Core Function. Maps a string to a concept using tiered resolution.
 
         Tiers:
-        0. Analyst Brain (HIGHEST priority - user memory wins)
-        1. Explicit Alias (high priority)
-        2. Exact Label Match
-        3. Keyword/Partial Match
-        4. Safe Mode Hierarchy Fallback
-        5. Unmapped (error)
+        0. Analyst Brain (HIGHEST priority - user memory wins) - confidence: 1.00
+        1. Explicit Alias (high priority) - confidence: 0.95
+        2. Exact Label Match - confidence: 0.90
+        3. Keyword/Partial Match - confidence: 0.70
+        4. Safe Mode Hierarchy Fallback - confidence: 0.50-0.70 (depth-dependent)
+        5. Unmapped (error) - confidence: 0.00
 
-        Returns a dict with result metadata.
+        Returns a dict with result metadata including confidence score.
         """
         norm_input = self._normalize(raw_input)
 
@@ -390,37 +405,71 @@ class FinancialMapper:
             if brain_mapping:
                 # Validate that the target exists in our taxonomy
                 if brain_mapping in self.reverse_id_map:
+                    # Calculate confidence
+                    confidence, confidence_explanation = self._calculate_confidence(
+                        "Analyst Brain (User Memory)",
+                        MappingSource.ANALYST_BRAIN if CONFIDENCE_ENGINE_AVAILABLE else None,
+                        0
+                    )
                     return {
                         "input": raw_input,
                         "found": True,
                         "element_id": brain_mapping,
                         "source": "BRAIN",
                         "concept_id": self.reverse_id_map[brain_mapping],
-                        "method": "Analyst Brain (User Memory)"
+                        "method": "Analyst Brain (User Memory)",
+                        "mapping_source": MappingSource.ANALYST_BRAIN if CONFIDENCE_ENGINE_AVAILABLE else None,
+                        "confidence": confidence,
+                        "confidence_explanation": confidence_explanation
                     }
 
         # Tier 1 & 2: Exact Match (alias or standard label)
         if norm_input in self.lookup_index:
             match = self.lookup_index[norm_input]
+            # Determine mapping source based on method
+            mapping_source = None
+            if CONFIDENCE_ENGINE_AVAILABLE:
+                if match["source"] == "ALIAS":
+                    mapping_source = MappingSource.ALIAS
+                else:
+                    mapping_source = MappingSource.EXACT_LABEL
+
+            confidence, confidence_explanation = self._calculate_confidence(
+                match["method"],
+                mapping_source,
+                0
+            )
             return {
                 "input": raw_input,
                 "found": True,
                 "element_id": match["element_id"],
                 "source": match["source"],
                 "concept_id": match["concept_id"],
-                "method": match["method"]
+                "method": match["method"],
+                "mapping_source": mapping_source,
+                "confidence": confidence,
+                "confidence_explanation": confidence_explanation
             }
 
         # Tier 3: Keyword/Partial Match
         partial_match = self._try_partial_match(raw_input)
         if partial_match:
+            mapping_source = MappingSource.KEYWORD if CONFIDENCE_ENGINE_AVAILABLE else None
+            confidence, confidence_explanation = self._calculate_confidence(
+                partial_match["method"],
+                mapping_source,
+                0
+            )
             return {
                 "input": raw_input,
                 "found": True,
                 "element_id": partial_match["element_id"],
                 "source": partial_match["source"],
                 "concept_id": partial_match["concept_id"],
-                "method": partial_match["method"]
+                "method": partial_match["method"],
+                "mapping_source": mapping_source,
+                "confidence": confidence,
+                "confidence_explanation": confidence_explanation
             }
 
         # Tier 4: Safe Mode - Walk up hierarchy
@@ -433,25 +482,62 @@ class FinancialMapper:
                     safe_parent = self._find_safe_parent(element_id)
                     if safe_parent:
                         parent_id, depth, path = safe_parent
+                        mapping_source = MappingSource.HIERARCHY if CONFIDENCE_ENGINE_AVAILABLE else None
+                        method = f"Safe Parent Fallback (depth={depth})"
+                        confidence, confidence_explanation = self._calculate_confidence(
+                            method,
+                            mapping_source,
+                            depth
+                        )
                         return {
                             "input": raw_input,
                             "found": True,
                             "element_id": parent_id,
                             "source": "US_GAAP",
                             "concept_id": self.reverse_id_map.get(parent_id),
-                            "method": f"Safe Parent Fallback (depth={depth})",
-                            "fallback_path": " -> ".join(path)
+                            "method": method,
+                            "mapping_source": mapping_source,
+                            "fallback_path": " -> ".join(path),
+                            "confidence": confidence,
+                            "confidence_explanation": confidence_explanation
                         }
 
         # Tier 5: Unmapped
+        mapping_source = MappingSource.UNMAPPED if CONFIDENCE_ENGINE_AVAILABLE else None
+        confidence, confidence_explanation = self._calculate_confidence(
+            "Unmapped",
+            mapping_source,
+            0
+        )
         return {
             "input": raw_input,
             "found": False,
             "element_id": None,
             "source": None,
             "concept_id": None,
-            "method": "Unmapped"
+            "method": "Unmapped",
+            "mapping_source": mapping_source,
+            "confidence": confidence,
+            "confidence_explanation": confidence_explanation
         }
+
+    def _calculate_confidence(self, method: str, mapping_source: Optional['MappingSource'], depth: int) -> Tuple[float, str]:
+        """
+        Calculate confidence score for a mapping.
+
+        Args:
+            method: Mapping method description
+            mapping_source: MappingSource enum (if available)
+            depth: Hierarchy depth (for fallback mappings)
+
+        Returns:
+            Tuple of (confidence_score, explanation)
+        """
+        if CONFIDENCE_ENGINE_AVAILABLE:
+            return calculate_mapping_confidence(method, mapping_source, depth)
+        else:
+            # Fallback if confidence engine not available
+            return (1.0, "Confidence engine not available")
 
     def get_concept_metadata(self, concept_id: str) -> dict:
         """Get full metadata for a concept from the database."""

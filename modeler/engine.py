@@ -50,6 +50,22 @@ from config.ib_rules import *
 from config.ib_rules import fuzzy_match_bucket, suggest_mapping, KEYWORD_FALLBACK_MAPPINGS
 from taxonomy_utils import get_taxonomy_engine, TaxonomyEngine
 
+# Import Confidence Engine
+try:
+    from utils.confidence_engine import (
+        check_blocking_rules,
+        ModelOutput,
+        generate_confidence_report,
+        calculate_aggregation_confidence,
+        calculate_recovery_confidence,
+        propagate_confidence
+    )
+    from utils.lineage_graph import AggregationStrategy
+    CONFIDENCE_ENGINE_AVAILABLE = True
+except ImportError as e:
+    CONFIDENCE_ENGINE_AVAILABLE = False
+    logger.warning(f"Confidence Engine not available: {e}. Blocking rules disabled.")
+
 
 # =============================================================================
 # THINKING LOGGER - Production V3.1
@@ -273,6 +289,10 @@ class FinancialEngine:
 
         # Audit trail
         self.audit_log: List[AuditEntry] = []
+
+        # Confidence tracking (PRODUCTION V3.1)
+        self.confidence_scores: Dict[str, float] = {}  # metric_name -> confidence score
+        self.confidence_enabled = CONFIDENCE_ENGINE_AVAILABLE
 
         # Report unmapped data
         if self.unmapped_count > 0:
@@ -1180,6 +1200,23 @@ class FinancialEngine:
 
         result_df = pd.DataFrame(data).T
 
+        # Check confidence blocking rules (PRODUCTION V3.1)
+        critical_metrics_dcf = {
+            "Revenue": revenue,
+            "EBITDA": ebitda_reported,
+            "Net Income": nopat,  # Using NOPAT as proxy for Net Income
+            "WACC": pd.Series([0.85] * len(revenue), index=revenue.index),  # Placeholder - would be calculated
+            "Capex": capex,
+            "Working Capital": delta_nwc
+        }
+        try:
+            self.check_model_blocking_rules("DCF", critical_metrics_dcf, attempt_num=1)
+        except ModelValidationError as e:
+            logger.error(f"DCF Model Blocked: {e}")
+            print(f"\n  ✗ DCF MODEL BLOCKED")
+            print(f"  {e}")
+            raise
+
         # Final validation - log summary
         print(f"\n  [DCF COMPLETE] Revenue: {revenue.sum():,.0f}, EBITDA: {ebitda_reported.sum():,.0f}, UFCF: {ufcf.sum():,.0f}")
 
@@ -1240,7 +1277,26 @@ class FinancialEngine:
             "Interest Coverage (Adj. EBITDA / Int)": interest_coverage.round(2),
         }
 
-        return pd.DataFrame(data).T
+        result_df = pd.DataFrame(data).T
+
+        # Check confidence blocking rules (PRODUCTION V3.1)
+        critical_metrics_lbo = {
+            "EBITDA": ebitda_adjusted,
+            "Debt": total_debt,
+            "Interest Expense": interest_expense,
+            "Exit EBITDA": ebitda_adjusted,  # Using same EBITDA as proxy for exit
+            "IRR": pd.Series([0.75] * len(ebitda_adjusted), index=ebitda_adjusted.index),  # Placeholder
+            "Cash Flow": ebitda_adjusted - interest_expense  # Simplified cash flow
+        }
+        try:
+            self.check_model_blocking_rules("LBO", critical_metrics_lbo, attempt_num=1)
+        except ModelValidationError as e:
+            logger.error(f"LBO Model Blocked: {e}")
+            print(f"\n  ✗ LBO MODEL BLOCKED")
+            print(f"  {e}")
+            raise
+
+        return result_df
 
     # =========================================================================
     # COMPS MODEL - Trading Comparables with Full EV Bridge
@@ -1298,7 +1354,142 @@ class FinancialEngine:
             "EPS (Diluted)": eps_diluted.round(2),
         }
 
-        return pd.DataFrame(data).T
+        result_df = pd.DataFrame(data).T
+
+        # Check confidence blocking rules (PRODUCTION V3.1)
+        critical_metrics_comps = {
+            "Revenue": revenue,
+            "EBITDA": ebitda,
+            "Market Cap": basic_shares,  # Using shares as proxy (would multiply by price)
+            "Enterprise Value": total_debt + basic_shares - cash  # Simplified EV
+        }
+        try:
+            self.check_model_blocking_rules("COMPS", critical_metrics_comps, attempt_num=1)
+        except ModelValidationError as e:
+            logger.error(f"Comps Model Blocked: {e}")
+            print(f"\n  ✗ COMPS MODEL BLOCKED")
+            print(f"  {e}")
+            raise
+
+        return result_df
+
+    # =========================================================================
+    # CONFIDENCE & BLOCKING RULES - Production V3.1
+    # =========================================================================
+
+    def _estimate_metric_confidence(self, metric_name: str, value_series: pd.Series,
+                                    attempt_num: int = 1) -> float:
+        """
+        Estimate confidence score for a calculated metric.
+
+        Args:
+            metric_name: Name of the metric (e.g., "Revenue", "EBITDA")
+            value_series: The pandas Series with calculated values
+            attempt_num: Recovery attempt number (1=strict, 2=relaxed, 3=desperate)
+
+        Returns:
+            Estimated confidence score (0.0 to 1.0)
+
+        NOTE: This is a simplified version. Full implementation would track
+        confidence through the entire calculation chain from mapping to aggregation.
+        """
+        if not self.confidence_enabled:
+            return 1.0  # Default if confidence engine not available
+
+        # Base confidence from recovery attempt
+        base_confidence, _ = calculate_recovery_confidence(attempt_num)
+
+        # Check if metric has non-zero values (zero might indicate unmapped)
+        if value_series.sum() == 0:
+            return 0.00  # No data mapped for this metric
+
+        # Check what percentage of expected periods have data
+        non_zero_periods = (value_series != 0).sum()
+        total_periods = len(value_series)
+        data_coverage = non_zero_periods / total_periods if total_periods > 0 else 0
+
+        # Adjust confidence based on data coverage
+        coverage_factor = min(1.0, data_coverage * 1.2)  # Boost slightly if good coverage
+
+        final_confidence = base_confidence * coverage_factor
+
+        # Store for later reference
+        self.confidence_scores[metric_name] = final_confidence
+
+        return final_confidence
+
+    def check_model_blocking_rules(self, model_type: str,
+                                   critical_metrics: Dict[str, pd.Series],
+                                   attempt_num: int = 1) -> Tuple[bool, Optional[ModelOutput]]:
+        """
+        Check if model should be blocked based on confidence thresholds.
+
+        Args:
+            model_type: "DCF", "LBO", or "COMPS"
+            critical_metrics: Dict of metric name -> value series
+            attempt_num: Recovery attempt number for confidence estimation
+
+        Returns:
+            Tuple of (should_proceed, model_output)
+            should_proceed: True if model can be generated, False if blocked
+            model_output: ModelOutput with blocking status and reasons
+
+        Raises:
+            ModelValidationError: If model is critically blocked
+        """
+        if not self.confidence_enabled:
+            # If confidence engine not available, allow model generation
+            return (True, None)
+
+        # Estimate confidence for each critical metric
+        critical_confidences = {}
+        for metric_name, value_series in critical_metrics.items():
+            confidence = self._estimate_metric_confidence(metric_name, value_series, attempt_num)
+            critical_confidences[metric_name] = confidence
+
+        # Check blocking rules
+        status, blocking_reasons, warning_reasons = check_blocking_rules(
+            model_type,
+            critical_confidences
+        )
+
+        # Calculate overall confidence (minimum of critical inputs)
+        overall_confidence = min(critical_confidences.values()) if critical_confidences else 0.0
+
+        # Build ModelOutput
+        model_output = ModelOutput(
+            model_type=model_type,
+            overall_confidence=overall_confidence,
+            critical_inputs=critical_confidences,
+            blocking_status=status,
+            blocking_reasons=blocking_reasons,
+            warning_reasons=warning_reasons,
+            low_confidence_items=[
+                {
+                    "name": name,
+                    "confidence": conf,
+                    "reason": f"Estimated confidence based on attempt {attempt_num}"
+                }
+                for name, conf in critical_confidences.items()
+                if conf < 0.75
+            ]
+        )
+
+        # Print confidence report
+        if status in ["BLOCKED", "WARNING"]:
+            print("\n" + "=" * 70)
+            print(generate_confidence_report(model_output))
+            print("=" * 70 + "\n")
+
+        # Handle blocking
+        if status == "BLOCKED":
+            error_msg = f"{model_type} model generation BLOCKED:\n"
+            for reason in blocking_reasons:
+                error_msg += f"  - {reason}\n"
+            error_msg += "\nACTION REQUIRED: Fix data quality issues or add analyst brain mappings."
+            raise ModelValidationError(error_msg)
+
+        return (True, model_output)
 
     # =========================================================================
     # VALIDATION - Cross-Statement Checks

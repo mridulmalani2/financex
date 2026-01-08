@@ -64,6 +64,10 @@ class FinancialNode:
     row_index: Optional[int] = None
     col_index: Optional[int] = None
 
+    # Confidence tracking (PRODUCTION V3.1)
+    confidence: float = 1.0               # Inherited from incoming edge(s)
+    confidence_explanation: str = ""      # Human-readable explanation
+
     # Metadata
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     session_id: str = ""
@@ -84,6 +88,8 @@ class FinancialNode:
             "cell_ref": self.cell_ref,
             "row_index": self.row_index,
             "col_index": self.col_index,
+            "confidence": self.confidence,
+            "confidence_explanation": self.confidence_explanation,
             "created_at": self.created_at,
             "session_id": self.session_id,
             "is_active": self.is_active
@@ -139,6 +145,11 @@ class FinancialEdge:
     confidence: float = 1.0               # 0.0 to 1.0
     source: Optional[MappingSource] = None
 
+    # Confidence tracking (PRODUCTION V3.1)
+    confidence_source: str = ""           # Explanation (e.g., "Exact Label Match")
+    confidence_breakdown: Dict[str, float] = field(default_factory=dict)
+    # Example: {"mapping": 0.90, "aggregation": 0.85, "final": 0.765}
+
     # Conditional edges (for hierarchy-aware aggregation)
     is_active: bool = True                # False if path not taken
     condition: Optional[str] = None       # Why this path was/wasn't taken
@@ -169,6 +180,8 @@ class FinancialEdge:
             "method": self.method,
             "confidence": self.confidence,
             "source": self.source.value if self.source else None,
+            "confidence_source": self.confidence_source,
+            "confidence_breakdown": self.confidence_breakdown,
             "is_active": self.is_active,
             "condition": self.condition,
             "aggregation_strategy": self.aggregation_strategy.value if self.aggregation_strategy else None,
@@ -539,6 +552,8 @@ class FinancialLineageGraph:
                 cell_ref=node_data.get("cell_ref"),
                 row_index=node_data.get("row_index"),
                 col_index=node_data.get("col_index"),
+                confidence=node_data.get("confidence", 1.0),
+                confidence_explanation=node_data.get("confidence_explanation", ""),
                 created_at=node_data["created_at"],
                 session_id=node_data["session_id"],
                 is_active=node_data["is_active"]
@@ -553,8 +568,10 @@ class FinancialLineageGraph:
                 source_node_ids=edge_data["source_node_ids"],
                 target_node_id=edge_data["target_node_id"],
                 method=edge_data["method"],
-                confidence=edge_data["confidence"],
+                confidence=edge_data.get("confidence", 1.0),
                 source=MappingSource(edge_data["source"]) if edge_data.get("source") else None,
+                confidence_source=edge_data.get("confidence_source", ""),
+                confidence_breakdown=edge_data.get("confidence_breakdown", {}),
                 is_active=edge_data["is_active"],
                 condition=edge_data.get("condition"),
                 aggregation_strategy=AggregationStrategy(edge_data["aggregation_strategy"]) if edge_data.get("aggregation_strategy") else None,
