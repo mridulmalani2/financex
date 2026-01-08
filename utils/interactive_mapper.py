@@ -30,21 +30,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.brain_manager import BrainManager
 from config.ib_rules import (
-    REVENUE_TOTAL_IDS, CAPEX_IDS, EBITDA_TOTAL_IDS,
+    REVENUE_TOTAL_IDS, CAPEX_IDS,
     COGS_TOTAL_IDS, TOTAL_ASSETS_IDS, TOTAL_LIABILITIES_IDS,
-    CASH_IDS, DA_IDS, NET_INCOME_IDS,
+    CASH_IDS, D_AND_A_IDS, NET_INCOME_IDS,
     fuzzy_match_bucket
 )
 
 
 # Critical metrics that must be mapped for DCF/LBO/Comps
+# Note: EBITDA is a calculated metric (Net Income + Interest + Tax + D&A), not directly mapped
 CRITICAL_BUCKETS = {
     "Revenue": REVENUE_TOTAL_IDS,
     "CapEx": CAPEX_IDS,
-    "EBITDA": EBITDA_TOTAL_IDS,
     "COGS": COGS_TOTAL_IDS,
     "Cash": CASH_IDS,
-    "D&A": DA_IDS,
+    "D&A": D_AND_A_IDS,
     "Net Income": NET_INCOME_IDS,
 }
 

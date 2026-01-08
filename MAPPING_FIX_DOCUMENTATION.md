@@ -126,13 +126,13 @@ self.df = self.raw_df[self.raw_df['Status'] == 'VALID'].copy()
 
 **Critical Buckets Identified:**
 ```python
+# Note: EBITDA is a calculated metric (Net Income + Interest + Tax + D&A), not directly mapped
 CRITICAL_BUCKETS = {
     "Revenue": REVENUE_TOTAL_IDS,
     "CapEx": CAPEX_IDS,
-    "EBITDA": EBITDA_TOTAL_IDS,
     "COGS": COGS_TOTAL_IDS,
     "Cash": CASH_IDS,
-    "D&A": DA_IDS,
+    "D&A": D_AND_A_IDS,
     "Net Income": NET_INCOME_IDS,
 }
 ```
