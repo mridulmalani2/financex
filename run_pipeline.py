@@ -92,10 +92,25 @@ def run_extractor(excel_path: str, output_dir: str) -> str:
     return output_file
 
 
-def run_normalizer(messy_file: str, output_dir: str) -> str:
-    """Run the normalizer to map to XBRL taxonomy."""
+def run_normalizer(messy_file: str, output_dir: str, interactive: bool = True,
+                   max_iterations: int = 3) -> str:
+    """
+    Run the normalizer to map to XBRL taxonomy with interactive mapping support.
+
+    Args:
+        messy_file: Path to messy input CSV
+        output_dir: Output directory
+        interactive: If True, prompt user for unmapped items
+        max_iterations: Maximum mapping iterations
+
+    Returns:
+        Path to normalized financials CSV
+    """
     import csv
+    import pandas as pd
     from mapper.mapper import FinancialMapper
+    from utils.brain_manager import BrainManager, load_brain_and_merge
+    from utils.interactive_mapper import InteractiveMapper, create_default_brain_if_missing
 
     print("\n" + "=" * 70)
     print("STAGE 2: NORMALIZATION & MAPPING")
@@ -109,71 +124,122 @@ def run_normalizer(messy_file: str, output_dir: str) -> str:
     alias_path = os.path.join(BASE_DIR, "config", "aliases.csv")
     output_file = os.path.join(output_dir, "normalized_financials.csv")
 
-    # Initialize mapper
-    print("Loading taxonomy and aliases...")
-    mapper = FinancialMapper(db_path, alias_path)
-    mapper.connect()
+    # Brain JSON path (persistent across runs)
+    brain_path = os.path.join(output_dir, "analyst_brain.json")
 
-    # Process input
-    print(f"Processing {messy_file}...")
+    # Initialize or load brain
+    print("Loading analyst brain...")
+    brain = create_default_brain_if_missing(brain_path, alias_path)
 
-    with open(messy_file, 'r', encoding='utf-8') as f_in, \
-         open(output_file, 'w', newline='', encoding='utf-8') as f_out:
+    # Mapping loop - try up to max_iterations times
+    iteration = 0
+    while iteration < max_iterations:
+        iteration += 1
+        print(f"\n--- Mapping Iteration {iteration}/{max_iterations} ---")
 
-        reader = csv.DictReader(f_in)
+        # Initialize mapper WITH brain
+        print("Loading taxonomy and aliases...")
+        mapper = FinancialMapper(db_path, alias_path, brain_manager=brain)
+        mapper.connect()
 
-        headers = [
-            "Source_Label", "Source_Amount",
-            "Statement_Source", "Period_Date",
-            "Status", "Canonical_Concept", "Concept_ID", "Standard_Label",
-            "Balance", "Period_Type", "Map_Method", "Taxonomy"
-        ]
-        writer = csv.DictWriter(f_out, fieldnames=headers)
-        writer.writeheader()
+        # Process input
+        print(f"Processing {messy_file}...")
 
-        row_count = 0
-        mapped_count = 0
+        with open(messy_file, 'r', encoding='utf-8') as f_in, \
+             open(output_file, 'w', newline='', encoding='utf-8') as f_out:
 
-        for row in reader:
-            raw_label = row.get("Line Item", "")
-            amount = row.get("Amount", "")
-            raw_note = row.get("Note", "--- | ---")
+            reader = csv.DictReader(f_in)
 
-            # Split note
-            if " | " in raw_note:
-                sheet_name, period_str = raw_note.split(" | ", 1)
+            headers = [
+                "Source_Label", "Source_Amount",
+                "Statement_Source", "Period_Date",
+                "Status", "Canonical_Concept", "Concept_ID", "Standard_Label",
+                "Balance", "Period_Type", "Map_Method", "Taxonomy"
+            ]
+            writer = csv.DictWriter(f_out, fieldnames=headers)
+            writer.writeheader()
+
+            row_count = 0
+            mapped_count = 0
+
+            for row in reader:
+                raw_label = row.get("Line Item", "")
+                amount = row.get("Amount", "")
+                raw_note = row.get("Note", "--- | ---")
+
+                # Split note
+                if " | " in raw_note:
+                    sheet_name, period_str = raw_note.split(" | ", 1)
+                else:
+                    sheet_name, period_str = raw_note, "Unknown"
+
+                # Map
+                result = mapper.map_input(raw_label)
+                meta = mapper.get_concept_metadata(result.get("concept_id"))
+                std_label = mapper.get_standard_label(result.get("concept_id")) or "---"
+
+                writer.writerow({
+                    "Source_Label": raw_label,
+                    "Source_Amount": amount,
+                    "Statement_Source": sheet_name.strip(),
+                    "Period_Date": period_str.strip(),
+                    "Status": "VALID" if result["found"] else "UNMAPPED",
+                    "Canonical_Concept": result["element_id"] or "---",
+                    "Concept_ID": result["concept_id"] or "---",
+                    "Standard_Label": std_label,
+                    "Balance": meta.get("balance") or "---",
+                    "Period_Type": meta.get("period_type") or "---",
+                    "Map_Method": result["method"],
+                    "Taxonomy": result["source"] or "---"
+                })
+
+                row_count += 1
+                if result["found"]:
+                    mapped_count += 1
+
+        success_rate = round(mapped_count / row_count * 100, 1) if row_count > 0 else 0
+        unmapped_count = row_count - mapped_count
+
+        print(f"\nProcessed: {row_count} rows")
+        print(f"Mapped: {mapped_count} ({success_rate}%)")
+        print(f"Unmapped: {unmapped_count}")
+
+        # Check if we should run interactive mapping
+        if unmapped_count > 0 and interactive and iteration < max_iterations:
+            # Load normalized file to detect unmapped items
+            normalized_df = pd.read_csv(output_file)
+
+            # Initialize interactive mapper
+            interactive_mapper = InteractiveMapper(brain, mapper, db_path)
+
+            # Detect unmapped items
+            unmapped_items = interactive_mapper.detect_unmapped_items(normalized_df)
+
+            if unmapped_items:
+                # Run interactive session
+                num_mapped, should_rerun = interactive_mapper.run_interactive_session(
+                    unmapped_items,
+                    brain_path,
+                    auto_mode=not interactive
+                )
+
+                if should_rerun and num_mapped > 0:
+                    print(f"\n✓ Added {num_mapped} mappings. Re-running normalization...")
+                    # Reload brain for next iteration
+                    brain = load_brain_and_merge(brain_path, alias_path)
+                    continue  # Next iteration
+                else:
+                    print(f"\nProceeding with current mappings.")
+                    break  # User skipped or no new mappings
             else:
-                sheet_name, period_str = raw_note, "Unknown"
+                print(f"\nNo unmapped items detected.")
+                break
+        else:
+            # No unmapped items or interactive mode disabled
+            break
 
-            # Map
-            result = mapper.map_input(raw_label)
-            meta = mapper.get_concept_metadata(result.get("concept_id"))
-            std_label = mapper.get_standard_label(result.get("concept_id")) or "---"
-
-            writer.writerow({
-                "Source_Label": raw_label,
-                "Source_Amount": amount,
-                "Statement_Source": sheet_name.strip(),
-                "Period_Date": period_str.strip(),
-                "Status": "VALID" if result["found"] else "UNMAPPED",
-                "Canonical_Concept": result["element_id"] or "---",
-                "Concept_ID": result["concept_id"] or "---",
-                "Standard_Label": std_label,
-                "Balance": meta.get("balance") or "---",
-                "Period_Type": meta.get("period_type") or "---",
-                "Map_Method": result["method"],
-                "Taxonomy": result["source"] or "---"
-            })
-
-            row_count += 1
-            if result["found"]:
-                mapped_count += 1
-
-    success_rate = round(mapped_count / row_count * 100, 1) if row_count > 0 else 0
-    print(f"\nProcessed: {row_count} rows")
-    print(f"Mapped: {mapped_count} ({success_rate}%)")
-    print(f"Unmapped: {row_count - mapped_count}")
     print(f"Output: {output_file}")
+    print(f"Brain saved to: {brain_path}")
 
     return output_file
 
