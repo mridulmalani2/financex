@@ -1483,10 +1483,19 @@ class FinancialEngine:
 
         # Handle blocking
         if status == "BLOCKED":
-            error_msg = f"{model_type} model generation BLOCKED:\n"
+            error_msg = f"\n{model_type} model generation BLOCKED:\n"
+            error_msg += "=" * 70 + "\n"
             for reason in blocking_reasons:
-                error_msg += f"  - {reason}\n"
-            error_msg += "\nACTION REQUIRED: Fix data quality issues or add analyst brain mappings."
+                error_msg += f"  ✗ {reason}\n"
+            error_msg += "\n" + "=" * 70 + "\n"
+            error_msg += "ACTION REQUIRED:\n"
+            error_msg += "1. Check unmapped items in the normalization report\n"
+            error_msg += "2. Use the interactive mapping tool to map critical line items\n"
+            error_msg += "3. User mappings are saved to analyst_brain.json for future runs\n"
+            error_msg += "4. Re-run the pipeline after adding mappings\n"
+            error_msg += "\nTo map missing items, the pipeline will prompt you during normalization.\n"
+            error_msg += "Alternatively, manually edit analyst_brain.json to add custom mappings.\n"
+            error_msg += "=" * 70
             raise ModelValidationError(error_msg)
 
         return (True, model_output)
