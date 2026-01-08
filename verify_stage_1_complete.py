@@ -166,8 +166,8 @@ def main():
     print(f"Total Passed: {total_passed}/50")
     print(f"Total Failed: {total_failed}/50")
 
-    if total_failed == 0 and total_passed == 50:
-        print("\n🎉 ✅ STAGE 1 COMPLETE - ALL 50 CRITERIA PASSED")
+    if total_failed == 0 and total_passed >= 50:
+        print(f"\n🎉 ✅ STAGE 1 COMPLETE - ALL {total_passed} CRITERIA PASSED")
         print("\nYou may proceed to Stage 2.")
         return 0
     else:
