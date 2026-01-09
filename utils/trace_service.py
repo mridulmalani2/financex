@@ -138,11 +138,11 @@ class LineageTrace:
 
     # Analyst Brain
     analyst_corrections: List[Dict[str, Any]]  # History of corrections
-    is_local_only: bool = True  # Always True - data is local
 
     # Metadata
     created_at: str
     session_id: str
+    is_local_only: bool = True  # Always True - data is local
 
     def to_dict(self) -> Dict:
         return {
