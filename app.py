@@ -34,6 +34,17 @@ from validator.ai_auditor import AIAuditor, AuditSeverity
 from utils.brain_manager import BrainManager, get_brain_manager
 from utils.exporter import create_download_package, export_brain_only, ExportResult
 
+# Traceability imports
+from utils.lineage_manager import LineageManager, build_lineage_from_session
+from utils.trace_service import TraceService, InteractionTracker
+from utils.trace_ui import (
+    display_trace_inspector,
+    clickable_number,
+    display_dependency_graph,
+    display_trace_search,
+    display_low_confidence_traces
+)
+
 # -------------------------------------------------
 # CONFIGURATION - Production V1.0 Clean Slate
 # -------------------------------------------------
@@ -325,6 +336,22 @@ if 'current_step' not in st.session_state:
 
 if 'current_tab' not in st.session_state:
     st.session_state.current_tab = 0
+
+# Traceability session state
+if 'lineage_graph' not in st.session_state:
+    st.session_state.lineage_graph = None
+
+if 'trace_service' not in st.session_state:
+    st.session_state.trace_service = None
+
+if 'interaction_tracker' not in st.session_state:
+    st.session_state.interaction_tracker = None
+
+if 'current_trace' not in st.session_state:
+    st.session_state.current_trace = None
+
+if 'trace_panel_open' not in st.session_state:
+    st.session_state.trace_panel_open = False
 
 
 # -------------------------------------------------
@@ -657,6 +684,21 @@ def render_onboarding():
                     st.session_state.audit_report = auditor.run_full_audit()
                     st.session_state.onboarding_complete = True
 
+                    # Build lineage graph for traceability
+                    try:
+                        lineage_graph, trace_service = build_lineage_from_session(
+                            session_dir=output_dir,
+                            source_file=uploaded_file.name,
+                            session_id=session.session_id,
+                            brain_manager=st.session_state.brain_manager
+                        )
+                        st.session_state.lineage_graph = lineage_graph
+                        st.session_state.trace_service = trace_service
+                        st.session_state.interaction_tracker = InteractionTracker(session.session_id)
+                    except Exception as e:
+                        # Don't fail if lineage building fails
+                        print(f"Warning: Could not build lineage graph: {e}")
+
                     if result["success"]:
                         st.success("Analysis complete!")
                     else:
@@ -715,7 +757,7 @@ def render_analyst_cockpit():
     st.divider()
 
     # Tabs for different views
-    tabs = st.tabs(["Audit Results", "Financial Models", "Data View", "Fix Unmapped", "Downloads"])
+    tabs = st.tabs(["Audit Results", "Financial Models", "Traceability", "Data View", "Fix Unmapped", "Downloads"])
 
     # Tab 1: Audit Results
     with tabs[0]:
@@ -725,16 +767,20 @@ def render_analyst_cockpit():
     with tabs[1]:
         render_financial_models()
 
-    # Tab 3: Data View
+    # Tab 3: Traceability
     with tabs[2]:
+        render_traceability()
+
+    # Tab 4: Data View
+    with tabs[3]:
         render_data_view()
 
-    # Tab 4: Fix Unmapped
-    with tabs[3]:
+    # Tab 5: Fix Unmapped
+    with tabs[4]:
         render_fix_unmapped()
 
-    # Tab 5: Downloads
-    with tabs[4]:
+    # Tab 6: Downloads
+    with tabs[5]:
         render_downloads()
 
 
@@ -1070,6 +1116,125 @@ def _extract_bucket_name(finding) -> str:
             return bucket
 
     return None
+
+
+def render_traceability():
+    """Render traceability explorer with interactive trace inspector."""
+    st.markdown("## 🔍 Traceability Explorer")
+    st.markdown("""
+    Every number shown in FinanceX is **fully traceable** from source to final output.
+    Click any value to see its complete transformation history, dependencies, and reasoning.
+    """)
+
+    # Check if traceability is available
+    if not st.session_state.trace_service:
+        st.warning("⚠️ Traceability not available. Please process your data first.")
+        return
+
+    trace_service = st.session_state.trace_service
+    interaction_tracker = st.session_state.interaction_tracker
+
+    # Show current trace if one is selected
+    if st.session_state.current_trace:
+        st.markdown("---")
+        st.markdown("### 📊 Current Trace")
+
+        # Back button
+        if st.button("← Back to Explorer"):
+            st.session_state.current_trace = None
+            st.rerun()
+
+        # Display trace inspector
+        display_trace_inspector(
+            st.session_state.current_trace,
+            trace_service,
+            interaction_tracker
+        )
+
+        st.markdown("---")
+
+        # Dependency graph
+        if st.checkbox("Show Dependency Graph"):
+            display_dependency_graph(
+                st.session_state.current_trace.value_id,
+                trace_service,
+                direction="both",
+                max_depth=3
+            )
+
+    else:
+        # Traceability Explorer Home
+        st.markdown("### 🔎 Explore Traces")
+
+        # Search interface
+        with st.expander("Search Traces", expanded=True):
+            display_trace_search(trace_service)
+
+        st.markdown("---")
+
+        # Low confidence traces
+        with st.expander("⚠️ Review Low Confidence Mappings"):
+            threshold = st.slider("Confidence Threshold", 0.0, 1.0, 0.7, 0.05)
+            display_low_confidence_traces(trace_service, threshold=threshold)
+
+        st.markdown("---")
+
+        # Analyst Brain traces
+        with st.expander("🧠 Analyst Brain Overrides"):
+            brain_traces = trace_service.get_analyst_brain_traces()
+
+            if not brain_traces:
+                st.info("No analyst brain overrides found.")
+            else:
+                st.success(f"Found {len(brain_traces)} analyst brain overrides")
+
+                for trace in brain_traces:
+                    col1, col2, col3 = st.columns([3, 2, 1])
+
+                    with col1:
+                        st.markdown(f"**{trace.label}**")
+
+                    with col2:
+                        if isinstance(trace.final_value, (int, float)):
+                            st.markdown(f"{trace.final_value:,.2f}")
+                        else:
+                            st.markdown(str(trace.final_value))
+
+                    with col3:
+                        if st.button("View", key=f"brain_{trace.value_id}"):
+                            st.session_state.current_trace = trace
+                            st.rerun()
+
+        st.markdown("---")
+
+        # Graph statistics
+        if st.session_state.lineage_graph:
+            with st.expander("📊 Lineage Graph Statistics"):
+                stats = st.session_state.lineage_graph.get_statistics()
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric("Total Nodes", stats['total_nodes'])
+                    st.metric("Source Cells", stats['nodes_by_type'].get('source_cell', 0))
+
+                with col2:
+                    st.metric("Total Edges", stats['total_edges'])
+                    st.metric("Active Edges", stats['active_edges'])
+
+                with col3:
+                    st.metric("Avg Confidence", f"{stats['avg_confidence']:.1%}")
+                    st.metric("Extracted Values", stats['nodes_by_type'].get('extracted', 0))
+
+                # Mapping sources breakdown
+                st.markdown("**Mapping Sources**:")
+                for source, count in stats['mapping_sources'].items():
+                    st.markdown(f"- {source}: {count}")
+
+    # Interaction summary
+    if interaction_tracker and st.checkbox("Show Interaction Summary"):
+        summary = interaction_tracker.get_summary()
+        st.json(summary)
 
 
 def _force_generate_template():
