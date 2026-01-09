@@ -1209,16 +1209,23 @@ class FinancialEngine:
             "Capex": capex,
             "Working Capital": delta_nwc
         }
-        try:
-            self.check_model_blocking_rules("DCF", critical_metrics_dcf, attempt_num=1)
-        except ModelValidationError as e:
-            logger.error(f"DCF Model Blocked: {e}")
-            print(f"\n  ✗ DCF MODEL BLOCKED")
-            print(f"  {e}")
-            raise
+        should_proceed, model_output = self.check_model_blocking_rules("DCF", critical_metrics_dcf, attempt_num=1)
 
-        # Final validation - log summary
-        print(f"\n  [DCF COMPLETE] Revenue: {revenue.sum():,.0f}, EBITDA: {ebitda_reported.sum():,.0f}, UFCF: {ufcf.sum():,.0f}")
+        # Store model output for later reference in UI
+        if model_output:
+            self.dcf_validation_status = model_output.blocking_status
+            self.dcf_blocking_reasons = model_output.blocking_reasons
+            self.dcf_warning_reasons = model_output.warning_reasons
+        else:
+            self.dcf_validation_status = "PASS"
+            self.dcf_blocking_reasons = []
+            self.dcf_warning_reasons = []
+
+        if not should_proceed:
+            logger.warning(f"DCF Model has critical warnings - generating partial model")
+            print(f"\n  ⚠️  DCF MODEL HAS WARNINGS - Generated with available data")
+        else:
+            print(f"\n  [DCF COMPLETE] Revenue: {revenue.sum():,.0f}, EBITDA: {ebitda_reported.sum():,.0f}, UFCF: {ufcf.sum():,.0f}")
 
         return result_df
 
@@ -1288,13 +1295,21 @@ class FinancialEngine:
             "IRR": pd.Series([0.75] * len(ebitda_adjusted), index=ebitda_adjusted.index),  # Placeholder
             "Cash Flow": ebitda_adjusted - interest_expense  # Simplified cash flow
         }
-        try:
-            self.check_model_blocking_rules("LBO", critical_metrics_lbo, attempt_num=1)
-        except ModelValidationError as e:
-            logger.error(f"LBO Model Blocked: {e}")
-            print(f"\n  ✗ LBO MODEL BLOCKED")
-            print(f"  {e}")
-            raise
+        should_proceed, model_output = self.check_model_blocking_rules("LBO", critical_metrics_lbo, attempt_num=1)
+
+        # Store model output for later reference in UI
+        if model_output:
+            self.lbo_validation_status = model_output.blocking_status
+            self.lbo_blocking_reasons = model_output.blocking_reasons
+            self.lbo_warning_reasons = model_output.warning_reasons
+        else:
+            self.lbo_validation_status = "PASS"
+            self.lbo_blocking_reasons = []
+            self.lbo_warning_reasons = []
+
+        if not should_proceed:
+            logger.warning(f"LBO Model has critical warnings - generating partial model")
+            print(f"\n  ⚠️  LBO MODEL HAS WARNINGS - Generated with available data")
 
         return result_df
 
@@ -1363,13 +1378,21 @@ class FinancialEngine:
             "Market Cap": basic_shares,  # Using shares as proxy (would multiply by price)
             "Enterprise Value": total_debt + basic_shares - cash  # Simplified EV
         }
-        try:
-            self.check_model_blocking_rules("COMPS", critical_metrics_comps, attempt_num=1)
-        except ModelValidationError as e:
-            logger.error(f"Comps Model Blocked: {e}")
-            print(f"\n  ✗ COMPS MODEL BLOCKED")
-            print(f"  {e}")
-            raise
+        should_proceed, model_output = self.check_model_blocking_rules("COMPS", critical_metrics_comps, attempt_num=1)
+
+        # Store model output for later reference in UI
+        if model_output:
+            self.comps_validation_status = model_output.blocking_status
+            self.comps_blocking_reasons = model_output.blocking_reasons
+            self.comps_warning_reasons = model_output.warning_reasons
+        else:
+            self.comps_validation_status = "PASS"
+            self.comps_blocking_reasons = []
+            self.comps_warning_reasons = []
+
+        if not should_proceed:
+            logger.warning(f"Comps Model has critical warnings - generating partial model")
+            print(f"\n  ⚠️  COMPS MODEL HAS WARNINGS - Generated with available data")
 
         return result_df
 
@@ -1481,22 +1504,25 @@ class FinancialEngine:
             print(generate_confidence_report(model_output))
             print("=" * 70 + "\n")
 
-        # Handle blocking
+        # CHANGED: Do NOT raise exception - allow partial models to be generated
+        # This lets users access the UI to fix mappings via Tab 4 "Fix Unmapped"
         if status == "BLOCKED":
-            error_msg = f"\n{model_type} model generation BLOCKED:\n"
-            error_msg += "=" * 70 + "\n"
+            warning_msg = f"\n⚠️  {model_type} MODEL HAS CRITICAL WARNINGS:\n"
+            warning_msg += "=" * 70 + "\n"
             for reason in blocking_reasons:
-                error_msg += f"  ✗ {reason}\n"
-            error_msg += "\n" + "=" * 70 + "\n"
-            error_msg += "ACTION REQUIRED:\n"
-            error_msg += "1. Check unmapped items in the normalization report\n"
-            error_msg += "2. Use the interactive mapping tool to map critical line items\n"
-            error_msg += "3. User mappings are saved to analyst_brain.json for future runs\n"
-            error_msg += "4. Re-run the pipeline after adding mappings\n"
-            error_msg += "\nTo map missing items, the pipeline will prompt you during normalization.\n"
-            error_msg += "Alternatively, manually edit analyst_brain.json to add custom mappings.\n"
-            error_msg += "=" * 70
-            raise ModelValidationError(error_msg)
+                warning_msg += f"  ✗ {reason}\n"
+            warning_msg += "\n" + "=" * 70 + "\n"
+            warning_msg += "ACTION REQUIRED:\n"
+            warning_msg += "1. Review the Audit Results in Tab 1\n"
+            warning_msg += "2. Use Tab 4 'Fix Unmapped' to map critical line items\n"
+            warning_msg += "3. User mappings are saved to analyst_brain.json for future runs\n"
+            warning_msg += "4. Re-process after adding mappings for complete model\n"
+            warning_msg += "\nPartial model will be generated with available data.\n"
+            warning_msg += "=" * 70
+            logger.warning(warning_msg)
+            print(warning_msg)
+            # Return status indicating blocking issues, but do NOT raise exception
+            return (False, model_output)
 
         return (True, model_output)
 

@@ -637,9 +637,17 @@ def render_onboarding():
                 result = run_pipeline_programmatic(upload_path, output_dir, quiet=True)
                 st.session_state.pipeline_result = result
 
-                if result["success"]:
-                    # Run AI Auditor
-                    files = sm.get_session_files(session.session_id)
+                # Check if we have any outputs to show (even partial)
+                files = sm.get_session_files(session.session_id)
+                has_outputs = any([
+                    files.get("normalized"),
+                    files.get("dcf"),
+                    files.get("lbo"),
+                    files.get("comps")
+                ])
+
+                if result["success"] or has_outputs:
+                    # Run AI Auditor (even with partial data)
                     auditor = AIAuditor(
                         normalized_df=pd.read_csv(files["normalized"]) if files.get("normalized") else None,
                         dcf_df=pd.read_csv(files["dcf"]) if files.get("dcf") else None,
@@ -648,10 +656,19 @@ def render_onboarding():
                     )
                     st.session_state.audit_report = auditor.run_full_audit()
                     st.session_state.onboarding_complete = True
-                    st.success("Analysis complete!")
+
+                    if result["success"]:
+                        st.success("Analysis complete!")
+                    else:
+                        # Pipeline had issues but generated partial outputs
+                        st.warning(f"⚠️  Analysis completed with warnings. Review Tab 1 'Audit Results' and use Tab 4 'Fix Unmapped' to improve data quality.")
+                        if result.get("error"):
+                            st.info(f"Details: {result['error']}")
+
                     st.rerun()
                 else:
                     st.error(f"Pipeline failed: {result['error']}")
+                    st.error("No outputs were generated. Please check your input file format.")
 
 
 # -------------------------------------------------
